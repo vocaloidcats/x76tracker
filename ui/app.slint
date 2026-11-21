@@ -1,0 +1,1250 @@
+// x76 Elo Tracker (native). Drawn by Slint, styled after the x76.gg design language:
+// paper/ink neutrals, Archivo + IBM Plex Mono, pill controls, tier colours. Data comes from Rust.
+
+import { ScrollView, Palette } from "std-widgets.slint";
+
+import "fonts/Archivo-Regular.ttf";
+import "fonts/Archivo-Medium.ttf";
+import "fonts/Archivo-SemiBold.ttf";
+import "fonts/Archivo-Bold.ttf";
+import "fonts/IBMPlexMono-Regular.ttf";
+import "fonts/IBMPlexMono-Medium.ttf";
+import "fonts/IBMPlexMono-SemiBold.ttf";
+
+// ---------------------------------------------------------------- data shapes (filled by Rust)
+export struct Tick { y: float, label: string }
+export struct ChartPoint { x: float, y: float, value: string, when: string, change: string, dir: int, sub: string }
+export struct ChartData { ticks: [Tick], points: [ChartPoint], lookup: [int], start: string, span: string }
+export struct EventRow { when: string, when-full: string, wins: int, losses: int, note: string, elo: string, elo-dir: int, pts: string, pts-dir: int }
+export struct PlayerCard {
+    game: string, id: string, key: string, name: string, link: bool,
+    rank: string, top: int, tier: string, tier-key: int, moved: string, moved-dir: int, missing: bool,
+    points: string, points-delta: string, points-dir: int, since: string,
+    elo: string, elo-delta: string, elo-dir: int, elo-field: string,
+    wins: int, losses: int,
+    show-elo: bool, show-all: bool, confirm-remove: bool, flash: int,
+    has-chart: bool, chart: ChartData, tracking-since: string,
+    events: [EventRow], total-events: int,
+    kd: string, kd-ratio: string, acc: string, site24: string, site24-dir: int, site24-places: string, site24-places-dir: int,
+    first: bool, last: bool,
+}
+export struct SearchResult { id: string, rank: string, name: string, tier: string, tier-key: int, points: string, alias: string, tracked: bool }
+export struct GameData { id: string, label: string, mode: string, placeholder: string, players: [PlayerCard] }
+
+// ---------------------------------------------------------------- actions (handled in Rust)
+export global Actions {
+    callback period(index: int);
+    callback interval(index: int);
+    callback refresh();
+    callback theme(dark: bool);
+    callback search(game: string, query: string);
+    callback track(game: string, id: string);
+    callback remove-ask(key: string);
+    callback remove-cancel();
+    callback remove(game: string, id: string);
+    callback move(game: string, id: string, dir: int);
+    callback metric(key: string, elo: bool);
+    callback show-all(key: string);
+    callback open-profile(id: string);
+    callback dismiss-banner();
+}
+
+// Implemented in Rust: turns normalised chart points into a step-line path at a given pixel size.
+export global ChartMath {
+    pure callback step-path(points: [ChartPoint], w: float, h: float, area: bool) -> string;
+}
+
+// ---------------------------------------------------------------- tokens
+export global Theme {
+    in-out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    out property <color> canvas: dark ? #141313 : #f5f3ee;
+    out property <color> surface: dark ? #232120 : #fbfaf7;
+    out property <color> surface-2: dark ? #3a3735 : #edeae2;
+    out property <color> fg: dark ? #f5f3ee : #17161a;
+    out property <color> fg-muted: dark ? #a6a29a : #5c5a55;
+    out property <color> fg-faint: dark ? #7b776f : #8b887f;
+    out property <color> line-1: dark ? #f5f3ee29 : #17161a21;
+    out property <color> line-2: dark ? #f5f3ee4d : #17161a3d;
+    out property <color> accent-fg: dark ? #8fb4ff : #2b4bf2;
+    out property <color> action-bg: dark ? #f5f3ee : #141313;
+    out property <color> action-fg: dark ? #17161a : #f5f3ee;
+    out property <color> positive: dark ? #57c87f : #2e7d4f;
+    out property <color> positive-soft: dark ? #1c3226 : #e1efe6;
+    out property <color> danger: dark ? #e0665a : #c03b2d;
+    out property <color> danger-soft: dark ? #331f1c : #f7e4e1;
+    out property <color> warning: dark ? #e0a54a : #b07c10;
+    out property <color> warning-soft: dark ? #33291a : #f6edd8;
+    out property <string> mono: "IBM Plex Mono";
+
+    // 0 nab, 1 bronze, 2 silver, 3 gold, 4 platinum, 5 diamond, 6 prism, 7 light
+    public pure function tier-color(k: int) -> color {
+        return k == 1 ? (dark ? #d98a56 : #a8632f)
+            : k == 2 ? (dark ? #b7c3cd : #7c8793)
+            : k == 3 ? (dark ? #e8b93a : #b8860b)
+            : k == 4 ? (dark ? #57c9b8 : #1f8f7a)
+            : k == 5 ? (dark ? #7098ea : #3563c9)
+            : k == 6 ? (dark ? #b985f0 : #8b3fd1)
+            : k == 7 ? (dark ? #ffd977 : #c07d00)
+            : fg-faint;
+    }
+    public pure function dir-color(d: int) -> color {
+        return d > 0 ? positive : d < 0 ? danger : fg-faint;
+    }
+}
+
+// ---------------------------------------------------------------- small parts
+component Mono inherits Text {
+    font-family: Theme.mono;
+    font-size: 11px;
+    color: Theme.fg-muted;
+    vertical-alignment: center;
+}
+
+component Eyebrow inherits Mono {
+    letter-spacing: 0.22px;
+}
+
+// x76-style change marker: small ▲/▼ triangle + magnitude, coloured by direction
+component Delta inherits HorizontalLayout {
+    in property <string> text;
+    in property <int> dir;
+    in property <length> size: 12px;
+    in property <bool> mono: false;
+    spacing: 3px;
+    if root.dir != 0: VerticalLayout {
+        alignment: center;
+        Path {
+            width: root.size * 0.55;
+            height: root.size * 0.5;
+            viewbox-width: 10;
+            viewbox-height: 9;
+            commands: root.dir > 0 ? "M 5 0 L 10 9 L 0 9 Z" : "M 0 0 L 10 0 L 5 9 Z";
+            fill: Theme.dir-color(root.dir);
+        }
+    }
+    Text {
+        text: root.text;
+        font-family: root.mono ? Theme.mono : "Archivo";
+        font-size: root.size;
+        font-weight: 500;
+        color: Theme.dir-color(root.dir);
+        vertical-alignment: center;
+    }
+}
+
+component Pills inherits Rectangle {
+    in property <[string]> options;
+    in property <int> selected;
+    in property <bool> small;
+    callback chosen(index: int);
+    background: Theme.surface-2;
+    border-radius: self.height / 2;
+    HorizontalLayout {
+        padding: root.small ? 3px : 4px;
+        spacing: root.small ? 2px : 4px;
+        for opt[i] in root.options: Rectangle {
+            border-radius: self.height / 2;
+            background: i == root.selected ? Theme.surface : transparent;
+            animate background { duration: 150ms; }
+            HorizontalLayout {
+                padding-left: root.small ? 11px : 18px;
+                padding-right: self.padding-left;
+                padding-top: root.small ? 4px : 9px;
+                padding-bottom: self.padding-top;
+                Text {
+                    text: opt;
+                    font-size: root.small ? 12px : 13.5px;
+                    font-weight: 600;
+                    color: i == root.selected || pill-ta.has-hover ? Theme.fg : Theme.fg-muted;
+                    horizontal-alignment: center;
+                }
+            }
+            pill-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { if (i != root.selected) { root.chosen(i); } }
+            }
+        }
+    }
+}
+
+component Button inherits Rectangle {
+    in property <string> text;
+    in property <int> kind: 0; // 0 primary, 1 secondary, 2 danger
+    in property <bool> enabled: true;
+    callback clicked;
+    border-radius: self.height / 2;
+    background: root.kind == 1 ? (btn-ta.has-hover && root.enabled ? Theme.surface-2 : Theme.surface)
+        : root.kind == 2 ? (btn-ta.has-hover ? Theme.danger.darker(0.15) : Theme.danger)
+        : (btn-ta.has-hover && root.enabled ? (Theme.dark ? #ffffff : #3a3735) : Theme.action-bg);
+    border-width: 1px;
+    border-color: root.kind == 1 ? Theme.line-2 : self.background;
+    opacity: root.enabled ? 1 : 0.55;
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        Text {
+            text: root.text;
+            font-size: 14px;
+            font-weight: 500;
+            color: root.kind == 1 ? Theme.fg : root.kind == 2 ? #ffffff : Theme.action-fg;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    btn-ta := TouchArea {
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { if (root.enabled) { root.clicked(); } }
+    }
+}
+
+component RoundButton inherits Rectangle {
+    in property <string> icon;
+    in property <bool> enabled: true;
+    in property <bool> danger;
+    callback clicked;
+    width: 26px;
+    height: 26px;
+    border-radius: 13px;
+    background: rb-ta.has-hover && root.enabled ? Theme.canvas : Theme.surface;
+    opacity: root.enabled ? 1 : 0.35;
+    Path {
+        width: 11px;
+        height: 11px;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        commands: root.icon;
+        stroke: rb-ta.has-hover && root.enabled ? (root.danger ? Theme.danger : Theme.fg) : Theme.fg-muted;
+        stroke-width: 1.5px;
+    }
+    rb-ta := TouchArea {
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { if (root.enabled) { root.clicked(); } }
+    }
+}
+
+component Gem inherits Rectangle {
+    in property <int> tier-key;
+    width: 22px;
+    height: 22px;
+    Path {
+        width: 12px;
+        height: 12px;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        commands: "M 6 0 L 12 6 L 6 12 L 0 6 Z";
+        fill: root.tier-key == 6
+            ? @linear-gradient(115deg, #6fe3ff 0%, #9d7bff 35%, #f07ae0 65%, #c6f07a 100%)
+            : Theme.tier-color(root.tier-key);
+    }
+}
+
+component Chip inherits Rectangle {
+    in property <string> text;
+    in property <int> kind; // 1 win, -1 loss, 0 neutral
+    border-radius: 4px;
+    background: root.kind > 0 ? Theme.positive-soft : root.kind < 0 ? Theme.danger-soft : Theme.surface-2;
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        Mono {
+            text: root.text;
+            height: 19px;
+            font-weight: root.kind == 0 ? 500 : 600;
+            color: root.kind > 0 ? Theme.positive : root.kind < 0 ? Theme.danger : Theme.fg-muted;
+        }
+    }
+}
+
+component SearchBox inherits Rectangle {
+    in property <string> placeholder;
+    in property <string> game;
+    out property <string> query: input.text;
+    height: 40px;
+    border-radius: 8px;
+    background: Theme.surface-2;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.line-2 : transparent;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 9px;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+            Path {
+                width: 14px;
+                height: 14px;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: "M 18 11 A 7 7 0 1 1 4 11 A 7 7 0 1 1 18 11 M 20 20 L 16.4 16.4";
+                stroke: Theme.fg-faint;
+                stroke-width: 1.5px;
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+            input := TextInput {
+                font-size: 13.5px;
+                color: Theme.fg;
+                single-line: true;
+                vertical-alignment: center;
+                selection-background-color: Theme.accent-fg.with-alpha(0.35);
+                edited => { Actions.search(root.game, self.text); }
+            }
+            if input.text == "": Text {
+                text: root.placeholder;
+                font-size: 13.5px;
+                color: Theme.fg-faint;
+                vertical-alignment: center;
+                x: 0;
+                width: parent.width;
+                height: parent.height;
+            }
+        }
+        if input.text != "": VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+            RoundButton {
+                width: 22px;
+                height: 22px;
+                icon: "M 3 3 L 9 9 M 9 3 L 3 9";
+                clicked => {
+                    input.text = "";
+                    Actions.search(root.game, "");
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- chart
+component Chart inherits Rectangle {
+    in property <ChartData> c;
+    in property <int> tier-key;
+    in property <string> unit;
+    property <length> pw: self.width - 50px;
+    property <length> ph: self.height - 12px;
+    property <brush> ink: Theme.tier-color(root.tier-key);
+    property <int> n: root.c.points.length;
+    property <int> hi: ta.has-hover && root.n > 0
+        ? root.c.lookup[max(0, min(199, floor(ta.mouse-x / root.pw * 200)))]
+        : 0;
+    height: 112px;
+
+    for t in root.c.ticks: Rectangle {
+        x: 0;
+        y: 6px + t.y * root.ph;
+        width: root.pw;
+        height: 1px;
+        background: Theme.line-1;
+    }
+    for t in root.c.ticks: Mono {
+        x: root.pw + 10px;
+        y: 6px + t.y * root.ph - 7px;
+        height: 14px;
+        text: t.label;
+        font-size: 10px;
+        color: Theme.fg-faint;
+    }
+    Path {
+        x: 0;
+        y: 6px;
+        width: root.pw;
+        height: root.ph;
+        viewbox-width: root.pw / 1px;
+        viewbox-height: root.ph / 1px;
+        commands: ChartMath.step-path(root.c.points, root.pw / 1px, root.ph / 1px, true);
+        fill: root.ink;
+        opacity: 0.1;
+    }
+    Path {
+        x: 0;
+        y: 6px;
+        width: root.pw;
+        height: root.ph;
+        viewbox-width: root.pw / 1px;
+        viewbox-height: root.ph / 1px;
+        commands: ChartMath.step-path(root.c.points, root.pw / 1px, root.ph / 1px, false);
+        stroke: root.ink;
+        stroke-width: 1.75px;
+    }
+    if root.n > 0: Rectangle {
+        x: root.pw - 3px;
+        y: 6px + root.c.points[root.n - 1].y * root.ph - 3px;
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        background: root.ink;
+    }
+
+    ta := TouchArea {
+        x: 0;
+        width: root.pw;
+    }
+    if ta.has-hover && root.n > 0: hover := Rectangle {
+        property <ChartPoint> p: root.c.points[root.hi];
+        property <length> cx: max(0px, min(ta.mouse-x, root.pw));
+        Rectangle {
+            x: hover.cx;
+            y: 6px;
+            width: 1px;
+            height: root.ph;
+            background: Theme.fg-muted.with-alpha(0.6);
+        }
+        Rectangle {
+            x: hover.cx - 4px;
+            y: 6px + hover.p.y * root.ph - 4px;
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: root.ink;
+            border-width: 2px;
+            border-color: Theme.surface-2;
+        }
+        Rectangle {
+            x: hover.cx + 14px + self.width > root.pw ? hover.cx - 14px - self.width : hover.cx + 14px;
+            y: 2px;
+            width: 176px;
+            background: Theme.canvas;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Theme.line-1;
+            VerticalLayout {
+                padding: 10px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                spacing: 2px;
+                Eyebrow { text: hover.p.when; font-size: 10px; }
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 2px;
+                    Text { text: hover.p.value; font-size: 18px; font-weight: 600; letter-spacing: -0.36px; color: Theme.fg; }
+                    VerticalLayout {
+                        alignment: end;
+                        padding-bottom: 3px;
+                        Text { text: root.unit; font-size: 12px; color: Theme.fg-muted; }
+                    }
+                }
+                if hover.p.change != "": HorizontalLayout {
+                    alignment: start;
+                    spacing: 5px;
+                    Delta { text: hover.p.change; dir: hover.p.dir; size: 11px; mono: true; }
+                    Mono { text: "vs previous"; }
+                }
+                Mono { text: hover.p.sub; }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- player card
+component PlayerCardView inherits Rectangle {
+    in property <PlayerCard> p;
+    in property <string> period-word;
+    property <string> period-upper: root.period-word == "today" ? "TODAY" : root.period-word == "last 24h" ? "LAST 24H" : "SINCE TRACKING";
+    property <bool> faded;
+    background: root.p.flash != 0 && !root.faded
+        ? Theme.surface-2.mix(root.p.flash > 0 ? Theme.positive-soft : Theme.danger-soft, 0.35)
+        : Theme.surface-2;
+    border-radius: 16px;
+    border-width: 1px;
+    border-color: root.p.flash > 0 && !root.faded ? Theme.positive : root.p.flash < 0 && !root.faded ? Theme.danger : transparent;
+    animate border-color, background { duration: 900ms; }
+
+    // a fresh result lights the card up briefly, then fades
+    Timer {
+        interval: 2200ms;
+        running: root.p.flash != 0 && !root.faded;
+        triggered => { root.faded = true; }
+    }
+
+    VerticalLayout {
+        padding-left: 18px;
+        padding-right: 18px;
+        padding-top: 16px;
+        padding-bottom: 14px;
+        spacing: 0;
+
+        // header
+        HorizontalLayout {
+            spacing: 12px;
+            Mono {
+                min-width: 34px;
+                horizontal-stretch: 0;
+                text: root.p.rank;
+                font-size: root.p.top > 0 ? 14px : 13px;
+                font-weight: root.p.top > 0 ? 600 : 500;
+                color: root.p.top == 1 ? Theme.tier-color(3) : root.p.top == 2 ? Theme.tier-color(2) : root.p.top == 3 ? Theme.tier-color(1) : Theme.fg-muted;
+            }
+            VerticalLayout { alignment: center; horizontal-stretch: 0; Gem { tier-key: root.p.tier-key; } }
+            VerticalLayout {
+                alignment: center;
+                spacing: 1px;
+                horizontal-stretch: 1;
+                name-text := Text {
+                    text: root.p.name;
+                    font-size: 16px;
+                    font-weight: 600;
+                    letter-spacing: -0.16px;
+                    color: root.p.link && name-ta.has-hover ? Theme.accent-fg : Theme.fg;
+                    overflow: elide;
+                    name-ta := TouchArea {
+                        enabled: root.p.link;
+                        mouse-cursor: root.p.link ? pointer : default;
+                        clicked => { Actions.open-profile(root.p.id); }
+                    }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 6px;
+                    Mono { text: root.p.tier; font-weight: 600; color: Theme.tier-color(root.p.tier-key); }
+                    if root.p.moved-dir != 0: Mono { text: "·"; }
+                    if root.p.moved-dir != 0: Delta { text: root.p.moved; dir: root.p.moved-dir; size: 11px; mono: true; }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 0;
+                HorizontalLayout {
+                    spacing: 4px;
+                    RoundButton {
+                        icon: "M 6 10.5 L 6 1.5 M 2.5 5 L 6 1.5 L 9.5 5";
+                        enabled: !root.p.first;
+                        clicked => { Actions.move(root.p.game, root.p.id, -1); }
+                    }
+                    RoundButton {
+                        icon: "M 6 1.5 L 6 10.5 M 2.5 7 L 6 10.5 L 9.5 7";
+                        enabled: !root.p.last;
+                        clicked => { Actions.move(root.p.game, root.p.id, 1); }
+                    }
+                    RoundButton {
+                        icon: "M 2.5 2.5 L 9.5 9.5 M 9.5 2.5 L 2.5 9.5";
+                        danger: true;
+                        clicked => { Actions.remove-ask(root.p.key); }
+                    }
+                }
+            }
+        }
+
+        if root.p.confirm-remove: VerticalLayout {
+            padding-top: 12px;
+            Rectangle {
+                background: Theme.danger-soft;
+                border-radius: 8px;
+                HorizontalLayout {
+                    padding: 8px;
+                    padding-left: 12px;
+                    spacing: 8px;
+                    Text {
+                        text: "Stop tracking " + root.p.name + "? Their history is kept.";
+                        font-size: 13px;
+                        color: Theme.fg;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                    VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Stop tracking"; kind: 2; clicked => { Actions.remove(root.p.game, root.p.id); } } }
+                    VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Cancel"; kind: 1; clicked => { Actions.remove-cancel(); } } }
+                }
+            }
+        }
+
+        if root.p.missing: VerticalLayout {
+            padding-top: 12px;
+            Rectangle {
+                background: Theme.warning-soft;
+                border-radius: 8px;
+                HorizontalLayout {
+                    padding: 8px;
+                    padding-left: 12px;
+                    Text {
+                        text: "Not on the current ladder (renamed or dropped off?). Showing the last numbers seen.";
+                        font-size: 13px;
+                        color: Theme.warning;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        // stats
+        HorizontalLayout {
+            padding-top: 16px;
+            spacing: 14px;
+            VerticalLayout {
+                horizontal-stretch: 1.15;
+                Eyebrow { text: "POINTS"; }
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 1px;
+                    Text { text: root.p.points; font-size: 26px; font-weight: 600; letter-spacing: -0.52px; color: Theme.fg; }
+                    VerticalLayout { alignment: end; padding-bottom: 5px; Text { text: "P"; font-size: 15px; font-weight: 600; color: Theme.fg-muted; } }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 8px;
+                    Delta { text: root.p.points-delta; dir: root.p.points-dir; }
+                    Mono { text: root.p.since; font-size: 10.5px; color: Theme.fg-faint; }
+                }
+            }
+            Rectangle { width: 1px; background: Theme.line-1; }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                Eyebrow { text: "ELO"; }
+                Text { text: root.p.elo; font-size: 26px; font-weight: 600; letter-spacing: -0.52px; color: Theme.fg; }
+                HorizontalLayout { alignment: start; Delta { text: root.p.elo-delta; dir: root.p.elo-dir; } }
+            }
+            Rectangle { width: 1px; background: Theme.line-1; }
+            VerticalLayout {
+                horizontal-stretch: 0.9;
+                Eyebrow { text: "W / L"; }
+                HorizontalLayout {
+                    alignment: start;
+                    Text { text: root.p.wins; font-size: 26px; font-weight: 600; letter-spacing: -0.52px; color: Theme.fg; }
+                    Text { text: " / "; font-size: 26px; font-weight: 500; color: Theme.fg-faint; }
+                    Text { text: root.p.losses; font-size: 26px; font-weight: 600; letter-spacing: -0.52px; color: Theme.fg; }
+                }
+                Mono { text: root.period-word; font-size: 10.5px; color: Theme.fg-faint; }
+            }
+        }
+
+        // chart
+        HorizontalLayout {
+            padding-top: 18px;
+            padding-bottom: 8px;
+            Eyebrow { text: (root.p.show-elo ? "ELO · " : "POINTS · ") + root.period-upper; horizontal-stretch: 1; }
+            Pills {
+                options: ["points", "elo"];
+                small: true;
+                selected: root.p.show-elo ? 1 : 0;
+                chosen(i) => { Actions.metric(root.p.key, i == 1); }
+            }
+        }
+        if root.p.has-chart: VerticalLayout {
+            Chart {
+                c: root.p.chart;
+                tier-key: root.p.tier-key;
+                unit: root.p.show-elo ? " elo" : "P";
+            }
+            HorizontalLayout {
+                padding-top: 6px;
+                Mono { text: root.p.chart.start; font-size: 10px; color: Theme.fg-faint; horizontal-stretch: 1; }
+                Mono { text: root.p.chart.span; font-size: 10px; color: Theme.fg-faint; horizontal-alignment: center; horizontal-stretch: 1; }
+                Mono { text: "now"; font-size: 10px; color: Theme.fg-faint; horizontal-alignment: right; horizontal-stretch: 1; }
+            }
+        }
+        if !root.p.has-chart: Rectangle {
+            height: 112px;
+            border-radius: 10px;
+            background: Theme.surface;
+            Text {
+                text: "Tracking since " + root.p.tracking-since + ". The line draws itself as results come in.";
+                font-size: 13px;
+                color: Theme.fg-muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                wrap: word-wrap;
+                width: parent.width - 36px;
+            }
+        }
+
+        // results
+        if root.p.events.length > 0: VerticalLayout {
+            padding-top: 16px;
+            spacing: 3px;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 8px;
+                Eyebrow { text: "when"; width: 68px; font-size: 10.5px; color: Theme.fg-faint; }
+                Eyebrow { text: "result"; horizontal-stretch: 1; font-size: 10.5px; color: Theme.fg-faint; }
+                Eyebrow { text: "elo"; width: 76px; horizontal-alignment: right; font-size: 10.5px; color: Theme.fg-faint; }
+                Eyebrow { text: "points"; width: 76px; horizontal-alignment: right; font-size: 10.5px; color: Theme.fg-faint; }
+            }
+            for e in root.p.events: Rectangle {
+                height: 33px;
+                background: Theme.surface;
+                border-radius: 8px;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 8px;
+                    Mono { text: e.when; width: 68px; font-size: 12px; }
+                    HorizontalLayout {
+                        horizontal-stretch: 1;
+                        alignment: start;
+                        spacing: 4px;
+                        if e.wins > 0: VerticalLayout { alignment: center; Chip { text: e.wins > 1 ? "\{e.wins}W" : "W"; kind: 1; } }
+                        if e.losses > 0: VerticalLayout { alignment: center; Chip { text: e.losses > 1 ? "\{e.losses}L" : "L"; kind: -1; } }
+                        if e.note != "": VerticalLayout { alignment: center; Chip { text: e.note; kind: 0; } }
+                    }
+                    Delta { width: 76px; alignment: end; text: e.elo; dir: e.elo-dir; mono: true; }
+                    Delta { width: 76px; alignment: end; text: e.pts; dir: e.pts-dir; mono: true; }
+                }
+            }
+            if root.p.total-events > 5: HorizontalLayout {
+                alignment: start;
+                padding-top: 6px;
+                Mono {
+                    text: root.p.show-all ? "show less" : "show all \{root.p.total-events} results";
+                    color: more-ta.has-hover ? Theme.fg : Theme.accent-fg;
+                    more-ta := TouchArea { mouse-cursor: pointer; clicked => { Actions.show-all(root.p.key); } }
+                }
+            }
+        }
+        if root.p.events.length == 0: VerticalLayout {
+            padding-top: 16px;
+            Rectangle {
+                border-radius: 8px;
+                background: Theme.surface;
+                HorizontalLayout {
+                    padding: 12px;
+                    Text {
+                        text: root.period-word == "since tracking"
+                            ? "No games recorded yet. New results appear here within one check."
+                            : "No games recorded " + root.period-word + ". New results appear here within one check.";
+                        font-size: 13px;
+                        color: Theme.fg-muted;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        // footer
+        VerticalLayout {
+            padding-top: 12px;
+            spacing: 10px;
+            Rectangle { height: 1px; background: Theme.line-1; }
+            HorizontalLayout {
+                alignment: start;
+                spacing: 16px;
+                HorizontalLayout {
+                    spacing: 5px;
+                    Mono { text: "k/d"; }
+                    Mono { text: root.p.kd; color: Theme.fg; font-weight: 500; }
+                    Mono { text: "·"; }
+                    Mono { text: root.p.kd-ratio; color: Theme.fg; font-weight: 500; }
+                }
+                if root.p.acc != "": HorizontalLayout {
+                    spacing: 5px;
+                    Mono { text: "acc"; }
+                    Mono { text: root.p.acc; color: Theme.fg; font-weight: 500; }
+                }
+                if root.p.site24 != "": HorizontalLayout {
+                    spacing: 6px;
+                    Mono { text: "x76 24h"; }
+                    Delta { text: root.p.site24; dir: root.p.site24-dir; size: 11px; mono: true; }
+                    if root.p.site24-places-dir != 0: Delta { text: root.p.site24-places; dir: root.p.site24-places-dir; size: 11px; mono: true; }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- game column
+component GameColumn inherits Rectangle {
+    in property <GameData> g;
+    in property <string> status;
+    in property <bool> status-error;
+    in property <[SearchResult]> results;
+    in property <string> search-msg;
+    in property <string> period-word;
+
+    VerticalLayout {
+        alignment: start;
+        spacing: 16px;
+        hdr := HorizontalLayout {
+            spacing: 24px;
+            VerticalLayout {
+                alignment: end;
+                spacing: 6px;
+                horizontal-stretch: 1;
+                Text { text: root.g.label; font-size: 28px; font-weight: 500; letter-spacing: -0.56px; color: Theme.fg; }
+                Mono {
+                    text: root.g.mode + " · " + root.status;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    color: root.status-error ? Theme.danger : Theme.fg-muted;
+                }
+            }
+            VerticalLayout {
+                alignment: end;
+                horizontal-stretch: 0;
+                search := SearchBox {
+                    min-width: 180px;
+                    preferred-width: 300px;
+                    max-width: 320px;
+                    game: root.g.id;
+                    placeholder: root.g.placeholder;
+                }
+            }
+        }
+        if root.g.players.length == 0: Rectangle {
+            border-radius: 10px;
+            background: Theme.surface-2;
+            HorizontalLayout {
+                padding: 20px;
+                padding-left: 22px;
+                Text {
+                    text: "No " + root.g.label + " players tracked yet. Find yourself with the search above and hit Track. Every win and loss is recorded from that moment on.";
+                    font-size: 14.5px;
+                    color: Theme.fg-muted;
+                    wrap: word-wrap;
+                }
+            }
+        }
+        for p in root.g.players: PlayerCardView {
+            p: p;
+            period-word: root.period-word;
+        }
+    }
+
+    // search results drop-down, drawn over the cards
+    if search.query != "": Rectangle {
+        x: root.width - self.width;
+        y: hdr.height + 8px;
+        width: min(380px, root.width);
+        // sized to its rows, not to the column it floats over
+        height: dd.preferred-height;
+        background: Theme.canvas;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.line-1;
+        dd := VerticalLayout {
+            padding: 6px;
+            for r in root.results: Rectangle {
+                border-radius: 6px;
+                background: res-ta.has-hover ? Theme.surface-2 : transparent;
+                res-ta := TouchArea { }
+                HorizontalLayout {
+                    padding: 8px;
+                    spacing: 10px;
+                    Mono { text: r.rank; width: 52px; font-size: 12px; }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        Text { text: r.name; font-size: 14.5px; font-weight: 600; letter-spacing: -0.15px; color: Theme.fg; overflow: elide; }
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 6px;
+                            Mono { text: r.tier; color: Theme.tier-color(r.tier-key); }
+                            Mono { text: "· " + r.points + "P"; }
+                            if r.alias != "": Mono { text: "· " + r.alias; overflow: elide; }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 0;
+                        Button {
+                            text: r.tracked ? "Tracking" : "Track";
+                            kind: r.tracked ? 1 : 0;
+                            enabled: !r.tracked;
+                            clicked => { Actions.track(root.g.id, r.id); }
+                        }
+                    }
+                }
+            }
+            if root.search-msg != "": HorizontalLayout {
+                padding: 10px;
+                Text { text: root.search-msg; font-size: 13.5px; color: Theme.fg-muted; wrap: word-wrap; }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- window chrome
+// Controls for the custom title bar; handled in Rust through winit (native drag, snap, resize).
+export global WindowCtl {
+    in-out property <bool> maximized;
+    callback drag();
+    callback minimize();
+    callback toggle-maximize();
+    callback close();
+    callback resize(direction: int); // 0 N, 1 NE, 2 E, 3 SE, 4 S, 5 SW, 6 W, 7 NW
+}
+
+component CaptionButton inherits Rectangle {
+    in property <string> icon;
+    in property <bool> close;
+    callback clicked;
+    width: 40px;
+    height: 32px;
+    border-radius: 8px;
+    background: cb-ta.has-hover ? (root.close ? Theme.danger : Theme.surface-2) : transparent;
+    animate background { duration: 120ms; }
+    Path {
+        width: 11px;
+        height: 11px;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        commands: root.icon;
+        stroke: cb-ta.has-hover && root.close ? #ffffff : Theme.fg-muted;
+        stroke-width: 1.3px;
+    }
+    cb-ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component ResizeEdge inherits TouchArea {
+    in property <int> direction;
+    pointer-event(e) => {
+        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+            WindowCtl.resize(root.direction);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- window
+export component AppWindow inherits Window {
+    in property <GameData> ql;
+    in property <GameData> r5;
+    in property <string> ql-status;
+    in property <bool> ql-status-error;
+    in property <string> r5-status;
+    in property <bool> r5-status-error;
+    in property <[SearchResult]> ql-results;
+    in property <[SearchResult]> r5-results;
+    in property <string> ql-search-msg;
+    in property <string> r5-search-msg;
+    in property <string> live-text: "starting…";
+    in property <int> live-state; // 0 idle, 1 live, 2 checking, 3 error
+    in property <int> interval-idx: 1;
+    in property <[string]> intervals: ["every 30s", "every 1 min", "every 2 min", "every 5 min"];
+    in property <int> period;
+    in property <string> data-file;
+    in property <string> version;
+    in property <string> banner;
+    property <string> period-word: period == 0 ? "today" : period == 1 ? "last 24h" : "since tracking";
+    property <bool> wide: sv.visible-width >= 1100px;
+    // side margins (x76's 1376px container) and the width of each game column when side by side
+    property <length> pad: root.wide ? max(48px, (sv.visible-width - 1376px) / 2) : 20px;
+    property <length> col-w: (sv.visible-width - 2 * root.pad - 36px) / 2;
+    property <length> edge: 5px;
+
+    public function set-dark(d: bool) {
+        Palette.color-scheme = d ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    title: "Elo Tracker for x76";
+    icon: @image-url("icon.png");
+    no-frame: true;
+    preferred-width: 1440px;
+    preferred-height: 1000px;
+    min-width: 760px;
+    min-height: 560px;
+    background: Theme.canvas;
+    default-font-family: "Archivo";
+
+    VerticalLayout {
+        // ------------------------------------------------ title bar: drag to move, double-click to maximize
+        Rectangle {
+            height: 64px;
+            background: Theme.canvas;
+            TouchArea {
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                        WindowCtl.drag();
+                    }
+                }
+                double-clicked => { WindowCtl.toggle-maximize(); }
+            }
+            HorizontalLayout {
+                padding-left: 24px;
+                padding-right: 10px;
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    Path {
+                        width: 22px;
+                        height: 22px;
+                        viewbox-width: 32;
+                        viewbox-height: 32;
+                        commands: "M 6 22 L 12 22 L 12 16 L 18 16 L 18 11 L 26 11";
+                        stroke: Theme.fg;
+                        stroke-width: 2.4px;
+                    }
+                }
+                Text { horizontal-stretch: 0; text: "Elo Tracker"; font-size: 17px; font-weight: 600; letter-spacing: -0.34px; color: Theme.fg; vertical-alignment: center; }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    Rectangle {
+                        background: Theme.surface-2;
+                        border-radius: self.height / 2;
+                        HorizontalLayout {
+                            padding-left: 9px;
+                            padding-right: 9px;
+                            padding-top: 2px;
+                            padding-bottom: 2px;
+                            Mono { text: "unofficial"; font-size: 10.5px; }
+                        }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    horizontal-stretch: 0;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 7px;
+                            height: 7px;
+                            border-radius: 3.5px;
+                            background: root.live-state == 1 ? Theme.positive : root.live-state == 2 ? Theme.accent-fg : root.live-state == 3 ? Theme.danger : Theme.fg-faint;
+                        }
+                    }
+                    // the status text gives way first (ellipsis) when the window gets narrow
+                    Mono { text: root.live-text; font-size: 12px; overflow: elide; min-width: 0px; }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    sel := Rectangle {
+                        height: 34px;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: sel-ta.has-hover ? Theme.line-2 : Theme.line-1;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 10px;
+                            Text { text: root.intervals[root.interval-idx]; font-size: 13px; color: Theme.fg; vertical-alignment: center; }
+                            VerticalLayout {
+                                alignment: center;
+                                Path {
+                                    width: 9px;
+                                    height: 5px;
+                                    viewbox-width: 10;
+                                    viewbox-height: 6;
+                                    commands: "M 1 1 L 5 5 L 9 1";
+                                    stroke: Theme.fg;
+                                    stroke-width: 1.4px;
+                                }
+                            }
+                        }
+                        sel-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { menu.show(); }
+                        }
+                        menu := PopupWindow {
+                            x: 0;
+                            y: sel.height + 6px;
+                            width: 160px;
+                            Rectangle {
+                                background: Theme.canvas;
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: Theme.line-1;
+                                VerticalLayout {
+                                    padding: 6px;
+                                    for opt[i] in root.intervals: Rectangle {
+                                        height: 32px;
+                                        border-radius: 6px;
+                                        background: opt-ta.has-hover ? Theme.surface-2 : transparent;
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            Text {
+                                                text: opt;
+                                                font-size: 13px;
+                                                font-weight: i == root.interval-idx ? 600 : 400;
+                                                color: Theme.fg;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        opt-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { Actions.interval(i); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    RoundButton {
+                        icon: "M 6 1.5 A 4.5 4.5 0 1 0 6 10.5 A 4.5 4.5 0 1 0 6 1.5 Z M 6 1.5 L 6 10.5";
+                        clicked => {
+                            root.set-dark(!Theme.dark);
+                            Actions.theme(Theme.dark);
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    Button { text: "Refresh"; clicked => { Actions.refresh(); } }
+                }
+                // window controls
+                Rectangle { width: 1px; horizontal-stretch: 0; }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    HorizontalLayout {
+                        spacing: 2px;
+                        CaptionButton {
+                            icon: "M 1 6 L 11 6";
+                            clicked => { WindowCtl.minimize(); }
+                        }
+                        CaptionButton {
+                            icon: WindowCtl.maximized
+                                ? "M 3.5 1 L 11 1 L 11 8.5 M 1 3.5 L 8.5 3.5 L 8.5 11 L 1 11 Z"
+                                : "M 1 1 L 11 1 L 11 11 L 1 11 Z";
+                            clicked => { WindowCtl.toggle-maximize(); }
+                        }
+                        CaptionButton {
+                            icon: "M 1.5 1.5 L 10.5 10.5 M 10.5 1.5 L 1.5 10.5";
+                            close: true;
+                            clicked => { WindowCtl.close(); }
+                        }
+                    }
+                }
+            }
+            // hairline under the bar once the page scrolls beneath it
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: sv.content-y < 0 ? Theme.line-1 : transparent;
+            }
+        }
+
+        // ------------------------------------------------ page
+        sv := ScrollView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            content-height: page.preferred-height;
+
+            page := VerticalLayout {
+                width: sv.visible-width;
+                alignment: start;
+
+                // content column, centred with x76's container width
+                HorizontalLayout {
+                    padding-left: root.pad;
+                    padding-right: root.pad;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: start;
+
+                        // masthead
+                        HorizontalLayout {
+                            padding-top: 28px;
+                            spacing: 40px;
+                            VerticalLayout {
+                                horizontal-stretch: 0;
+                                spacing: 18px;
+                                Text {
+                                    text: "Your climb, live.";
+                                    font-size: root.wide ? 54px : 40px;
+                                    font-weight: 500;
+                                    letter-spacing: root.wide ? -1.08px : -0.8px;
+                                    color: Theme.fg;
+                                }
+                                HorizontalLayout {
+                                    Text {
+                                        text: "Every point you win or lose on the x76 ladders, as it lands. Track yourself and your friends in Quake Live and R5Reloaded.";
+                                        font-size: 17px;
+                                        color: Theme.fg-muted;
+                                        wrap: word-wrap;
+                                        preferred-width: 560px;
+                                        max-width: 560px;
+                                    }
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            VerticalLayout {
+                                alignment: start;
+                                padding-top: 6px;
+                                horizontal-stretch: 0;
+                                Pills {
+                                    options: ["Today", "Last 24h", "All tracked"];
+                                    selected: root.period;
+                                    chosen(i) => { Actions.period(i); }
+                                }
+                            }
+                        }
+
+                        if root.banner != "": VerticalLayout {
+                            padding-top: 24px;
+                            Rectangle {
+                                background: Theme.danger-soft;
+                                border-radius: 8px;
+                                HorizontalLayout {
+                                    padding: 10px;
+                                    padding-left: 16px;
+                                    spacing: 10px;
+                                    Text { text: root.banner; font-size: 14px; color: Theme.danger; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        horizontal-stretch: 0;
+                                        RoundButton { icon: "M 2.5 2.5 L 9.5 9.5 M 9.5 2.5 L 2.5 9.5"; clicked => { Actions.dismiss-banner(); } }
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 36px; }
+                        Rectangle { height: 1px; background: Theme.line-1; }
+                        Rectangle { height: 36px; }
+
+                        // games: side by side when wide, stacked when narrow
+                        if root.wide: HorizontalLayout {
+                            spacing: 36px;
+                            // fixed equal halves, whatever each column contains
+                            VerticalLayout {
+                                alignment: start;
+                                width: root.col-w;
+                                GameColumn { g: root.ql; status: root.ql-status; status-error: root.ql-status-error; results: root.ql-results; search-msg: root.ql-search-msg; period-word: root.period-word; }
+                            }
+                            VerticalLayout {
+                                alignment: start;
+                                width: root.col-w;
+                                GameColumn { g: root.r5; status: root.r5-status; status-error: root.r5-status-error; results: root.r5-results; search-msg: root.r5-search-msg; period-word: root.period-word; }
+                            }
+                        }
+                        if !root.wide: VerticalLayout {
+                            spacing: 48px;
+                            GameColumn { g: root.ql; status: root.ql-status; status-error: root.ql-status-error; results: root.ql-results; search-msg: root.ql-search-msg; period-word: root.period-word; }
+                            GameColumn { g: root.r5; status: root.r5-status; status-error: root.r5-status-error; results: root.r5-results; search-msg: root.r5-search-msg; period-word: root.period-word; }
+                        }
+
+                        HorizontalLayout {
+                            padding-top: 48px;
+                            Text {
+                                text: "Unofficial and community-made, not affiliated with x76.gg. Points are the ladder number shown on x76.gg; Elo is the hidden rating behind it (Quake Live rating, R5Reloaded elo). History is saved in " + root.data-file + ". Version " + root.version + ".";
+                                font-size: 13px;
+                                color: Theme.fg-faint;
+                                wrap: word-wrap;
+                                max-width: 780px;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            padding-top: 10px;
+                            padding-bottom: 56px;
+                            Mono { text: "Made with Slint"; font-size: 11px; color: Theme.fg-faint; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------ resize handles along the edges (off while maximized)
+    if !WindowCtl.maximized: ResizeEdge { x: root.edge * 2; y: 0; width: root.width - 4 * root.edge; height: root.edge; direction: 0; mouse-cursor: ns-resize; }
+    if !WindowCtl.maximized: ResizeEdge { x: root.width - root.edge; y: root.edge * 2; width: root.edge; height: root.height - 4 * root.edge; direction: 2; mouse-cursor: ew-resize; }
+    if !WindowCtl.maximized: ResizeEdge { x: root.edge * 2; y: root.height - root.edge; width: root.width - 4 * root.edge; height: root.edge; direction: 4; mouse-cursor: ns-resize; }
+    if !WindowCtl.maximized: ResizeEdge { x: 0; y: root.edge * 2; width: root.edge; height: root.height - 4 * root.edge; direction: 6; mouse-cursor: ew-resize; }
+    if !WindowCtl.maximized: ResizeEdge { x: root.width - 2 * root.edge; y: 0; width: 2 * root.edge; height: 2 * root.edge; direction: 1; mouse-cursor: nesw-resize; }
+    if !WindowCtl.maximized: ResizeEdge { x: root.width - 2 * root.edge; y: root.height - 2 * root.edge; width: 2 * root.edge; height: 2 * root.edge; direction: 3; mouse-cursor: nwse-resize; }
+    if !WindowCtl.maximized: ResizeEdge { x: 0; y: root.height - 2 * root.edge; width: 2 * root.edge; height: 2 * root.edge; direction: 5; mouse-cursor: nesw-resize; }
+    if !WindowCtl.maximized: ResizeEdge { x: 0; y: 0; width: 2 * root.edge; height: 2 * root.edge; direction: 7; mouse-cursor: nwse-resize; }
+}
