@@ -13,6 +13,7 @@ slint::include_modules!();
 mod discord;
 mod profile;
 mod r5log;
+mod r5patch;
 mod ranks;
 mod rpc;
 mod servers;
@@ -215,6 +216,9 @@ fn tick(app: &AppWindow, shared: &Shared) {
     app.set_layout_status(d.layout.0.into());
     app.set_layout_error(d.layout.1);
     app.set_layout_busy(d.layout.2);
+    let (t, st) = view::patch_status(&core);
+    app.set_patch_status(t.into());
+    app.set_patch_state(st);
 }
 
 fn set_results(app: &AppWindow, game: Game, hits: &[Hit], msg: &str) {
@@ -688,6 +692,44 @@ fn wire(app: &AppWindow, shared: &Arc<Shared>) {
             }
         }
     });
+    actions.on_r5_patch({
+        let (w, s) = ctx!();
+        move |on| {
+            let dir = s.lock().setting_str("r5Path").map(PathBuf::from);
+            let result = match &dir {
+                None => Err("Enter the R5Reloaded folder first.".to_string()),
+                Some(d) if on => r5patch::install(d),
+                Some(d) => r5patch::remove(d),
+            };
+            {
+                let mut core = s.lock();
+                match result {
+                    Ok(()) => {
+                        core.set_setting("r5Patch", on.into());
+                        core.r5patch_note = None;
+                    }
+                    Err(e) => core.r5patch_note = Some((true, e)),
+                }
+            }
+            s.check_r5_patch(false);
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_r5_path({
+        let (w, s) = ctx!();
+        move |text| {
+            let dir = PathBuf::from(text.trim().trim_matches('"'));
+            if dir.join("r5apex.exe").is_file() {
+                s.lock().set_setting("r5Path", dir.display().to_string().into());
+                s.check_r5_patch(false);
+                if let Some(app) = w.upgrade() {
+                    refresh(&app, &s);
+                }
+            }
+        }
+    });
     actions.on_open_url(|url| {
         if url.starts_with("https://discord.com/") {
             let _ = std::process::Command::new("explorer").arg(url.as_str()).spawn();
@@ -908,6 +950,7 @@ mod screenshot {
             shared.poll_servers();
         }
         shared.scan_r5(&mut r5log::Tail::default());
+        shared.check_r5_patch(false);
         let saved_handle = shared.lock().setting_str("x76Handle");
         let pics = saved_handle.and_then(|h| fetch_profile(&shared, &h).ok());
         let app = AppWindow::new()?;
@@ -1058,8 +1101,15 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let (r5_shared, r5_weak) = (shared.clone(), app.as_weak());
     std::thread::spawn(move || {
         let mut tail = r5log::Tail::default();
+        let mut round = 0u32;
         loop {
-            if r5_shared.scan_r5(&mut tail) {
+            let mut changed = r5_shared.scan_r5(&mut tail);
+            // the patch: checked now and then, and put back if a game update replaced the script
+            if round % 30 == 0 {
+                changed |= r5_shared.check_r5_patch(true);
+            }
+            round = round.wrapping_add(1);
+            if changed {
                 let s = r5_shared.clone();
                 let _ = r5_weak.upgrade_in_event_loop(move |app| refresh(&app, &s));
             }

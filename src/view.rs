@@ -803,7 +803,7 @@ pub fn event_detail(core: &Core, key: &str, id: &str) -> Option<EventDetail> {
     let hint = if game != Game::R5 {
         "Who you fought is only known for R5Reloaded, from the game log.".to_string()
     } else if fight_rows.is_empty() {
-        "No fights from the game log in this change. Opponents are only known for games played with the game-log patch.".to_string()
+        "No fights from the game log in this change. To see who you fight, turn on R5Reloaded opponents in Settings.".to_string()
     } else if fight_rows.iter().any(|f| !f.rated) {
         "Unrated opponents weren't on the ladder, or were read too long after the fight to know their rating then.".to_string()
     } else {
@@ -1078,6 +1078,7 @@ pub fn discord_page(core: &Core) -> DiscordPage {
         .iter()
         .map(|f| StaticText { surface: s(f.surface.as_str()), name: s(f.name.as_str()), text: s(f.text.as_str()) })
         .collect();
+    let r5_dir = core.setting_str("r5Path");
     let (r5_names, r5_i) = player_choices(core, &cfg, Game::R5);
     let (ql_names, ql_i) = player_choices(core, &cfg, Game::Ql);
     let rpc_app = if cfg.rpc_app() == APP_ID {
@@ -1089,6 +1090,8 @@ pub fn discord_page(core: &Core) -> DiscordPage {
     DiscordPage {
         rpc: cfg.rpc,
         rpc_app: s(rpc_app),
+        r5_patch: core.r5patch == Some(crate::r5patch::State::On),
+        r5_found: r5_dir.is_some(),
         players_r5: model(r5_names.into_iter().map(s).collect()),
         player_r5: r5_i,
         players_ql: model(ql_names.into_iter().map(s).collect()),
@@ -1112,6 +1115,25 @@ pub fn discord_page(core: &Core) -> DiscordPage {
 pub fn discord_previews(core: &Core) -> ModelRc<SharedString> {
     let cfg = crate::discord::Config::load(core);
     model(cfg.layout.iter().map(|slot| s(crate::discord::preview(core, &cfg, slot))).collect())
+}
+
+/// The R5Reloaded patch's status line: (text, state as for Discord's lines).
+pub fn patch_status(core: &Core) -> (String, i32) {
+    use crate::r5patch::{script_path, State};
+    let Some(dir) = core.setting_str("r5Path") else {
+        return ("R5Reloaded wasn't found in the usual places. Enter its folder below (the one with r5apex.exe).".into(), 3);
+    };
+    let error = core.r5patch_note.as_ref().filter(|(err, _)| *err).map(|(_, t)| t.clone());
+    match (core.r5patch, error) {
+        (_, Some(e)) => (e, 3),
+        (Some(State::On), _) => {
+            let extra = core.r5patch_note.as_ref().map(|(_, t)| format!(" {t}")).unwrap_or_default();
+            (format!("On: {} is patched. It takes effect the next time the game starts.{extra}", script_path(std::path::Path::new(&dir)).display()), 2)
+        }
+        (Some(State::Off), _) => ("Off. The game's script is untouched.".into(), 0),
+        (Some(State::NoScript), _) => ("This R5Reloaded folder has no cl_obituary.gnut, so there's nothing to patch.".into(), 3),
+        (None, _) => ("Checking the game folder…".into(), 1),
+    }
 }
 
 pub struct DiscordStatus {

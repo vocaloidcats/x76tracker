@@ -60,7 +60,7 @@ export struct ProfileCard {
 export struct WidgetSlot { key: string, kind: int, surface: string, name: string, source: int, custom: string, is-custom: bool }
 export struct StaticText { surface: string, name: string, text: string }
 export struct DiscordPage {
-    rpc: bool, rpc-app: string,
+    rpc: bool, rpc-app: string, r5-patch: bool, r5-found: bool,
     players-r5: [string], player-r5: int, players-ql: [string], player-ql: int,
     widget: bool, app-id: string, user-id: string, has-token: bool, widget-rpc: bool,
     slots: [WidgetSlot], statics: [StaticText],
@@ -102,6 +102,8 @@ export global Actions {
     callback widget-custom(key: string, text: string);
     callback widget-now();
     callback open-url(url: string);
+    callback r5-patch(on: bool);
+    callback r5-path(folder: string);
 }
 
 // Implemented in Rust: turns normalised chart points into a step-line path at a given pixel size.
@@ -1713,6 +1715,8 @@ component SettingsPanel inherits Rectangle {
     in property <string> layout-status;
     in property <bool> layout-error;
     in property <bool> layout-busy;
+    in property <string> patch-status;
+    in property <int> patch-state;
     in-out property <int> tab;
     callback close();
     background: #000000a6;
@@ -1787,6 +1791,20 @@ component SettingsPanel inherits Rectangle {
                             Mono { text: "Quake Live"; }
                             Select { options: root.d.players-ql; selected: root.d.player-ql; chosen(i) => { Actions.player("ql", i); } }
                         }
+                    }
+                    Rectangle { height: 1px; background: Theme.line-1; }
+                    Eyebrow { text: "R5RELOADED OPPONENTS"; }
+                    SettingRow {
+                        on: root.d.r5-patch;
+                        title: "Log who I fight in R5Reloaded";
+                        body: "Adds a few lines to R5Reloaded's own script (cl_obituary.gnut) so the game writes each of your kills and deaths, with the other player's name, to its log. x76tracker reads that log to show who you fought, their Elo, upsets and your best wins. The original file is kept as a backup, and switching this off takes the lines out again. If a game update replaces the file, x76tracker puts the patch back.";
+                        toggled(v) => { Actions.r5-patch(v); }
+                    }
+                    StatusLine { text: root.patch-status; state: root.patch-state; }
+                    if !root.d.r5-found: VerticalLayout {
+                        spacing: 6px;
+                        Mono { text: "R5Reloaded folder"; }
+                        Field { mono: true; placeholder: "the folder with r5apex.exe, e.g. C:\\R5R Library\\LIVE"; edited(t) => { Actions.r5-path(t); } }
                     }
                 }
 
@@ -1973,6 +1991,8 @@ export component AppWindow inherits Window {
     in property <string> layout-status;
     in property <bool> layout-error;
     in property <bool> layout-busy;
+    in property <string> patch-status;
+    in property <int> patch-state;
     property <string> period-word: period == 0 ? "today" : period == 1 ? "last 24h" : "since tracking";
     property <bool> wide: sv.visible-width >= 1100px;
     // side margins (x76's 1376px container) and the width of each game column when side by side
@@ -2413,6 +2433,8 @@ export component AppWindow inherits Window {
         layout-status: root.layout-status;
         layout-error: root.layout-error;
         layout-busy: root.layout-busy;
+        patch-status: root.patch-status;
+        patch-state: root.patch-state;
         tab <=> root.settings-tab;
         close => { root.settings-open = false; }
     }

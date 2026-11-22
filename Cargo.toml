@@ -1,6 +1,6 @@
 [package]
 name = "x76tracker"
-version = "2.2.0"
+version = "2.2.1"
 edition = "2021"
 publish = false
 description = "x76tracker: unofficial live Elo/points tracker for the x76.gg Quake Live and R5Reloaded ladders"

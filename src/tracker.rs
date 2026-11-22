@@ -321,6 +321,10 @@ pub struct Core {
     pub server_file: PathBuf,
     /// Rich Presence and widget state that isn't saved (the token, what was sent, errors).
     pub discord: crate::discord::Live,
+    /// The optional R5Reloaded patch (None until the game folder is known), and the last thing
+    /// worth telling about it: (is an error, text).
+    pub r5patch: Option<crate::r5patch::State>,
+    pub r5patch_note: Option<(bool, String)>,
 }
 
 pub struct Shared {
@@ -360,6 +364,8 @@ impl Shared {
                 server_history,
                 server_file,
                 discord: crate::discord::Live { token, ..Default::default() },
+                r5patch: None,
+                r5patch_note: None,
             }),
             wake: Mutex::new(false),
             wake_cv: Condvar::new(),
@@ -511,6 +517,38 @@ impl Shared {
             crate::r5log::save(&file, &mut core.fights);
         }
         added || rated
+    }
+
+    /// Keeps the R5Reloaded patch the way it was set in Settings: with `fix`, puts it back when a
+    /// game update replaced the patched script. Returns true if what the UI shows changed.
+    pub fn check_r5_patch(&self, fix: bool) -> bool {
+        use crate::r5patch::{install, state, State};
+        let (dir, wanted, before) = {
+            let core = self.lock();
+            (core.setting_str("r5Path").map(PathBuf::from), core.state.settings.get("r5Patch").and_then(Value::as_bool), core.r5patch)
+        };
+        let Some(dir) = dir else { return false };
+        let mut now = state(&dir);
+        let mut note = None;
+        if fix && wanted == Some(true) && now == State::Off {
+            match install(&dir) {
+                Ok(()) => {
+                    now = State::On;
+                    note = Some((false, "A game update had replaced the script; the patch is back on.".to_string()));
+                }
+                Err(e) => note = Some((true, e)),
+            }
+        }
+        let mut core = self.lock();
+        if wanted.is_none() && now == State::On {
+            core.set_setting("r5Patch", true.into()); // patched before this switch existed
+        }
+        core.r5patch = Some(now);
+        let changed = before != Some(now) || note.is_some();
+        if note.is_some() {
+            core.r5patch_note = note;
+        }
+        changed
     }
 
     pub fn add_favorite(&self, game: Game, id: &str) -> Result<(), String> {

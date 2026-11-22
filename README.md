@@ -19,6 +19,15 @@ What you get:
 - **Live updates:** cards light up green or red when something changes.
 - **Servers tab:** live player counts on x76's Quake Live and R5Reloaded servers.
 
+## R5Reloaded opponents (optional)
+
+The x76 ladder only shows totals, so on its own x76tracker can't tell who you fought. Turn on **Settings → General → Log who I fight in R5Reloaded** and x76tracker adds a few lines to R5Reloaded's own script, `platform\scripts\vscripts\client\cl_obituary.gnut`. A mod can't do this, because R5Reloaded mods can't replace game scripts. The added lines write one line to the game's `script.log` for each of your kills and deaths (who, by whom, which weapon) and change nothing else. x76tracker reads that log to list each fight with the opponent's Elo, the upsets, and your best wins.
+
+- The original file is saved next to it as `cl_obituary.gnut.bak-x76tracker`. Switching the setting off takes the lines out again.
+- It takes effect the next time the game starts.
+- If a game update replaces the file, x76tracker puts the patch back while it's running. To undo it by hand, copy the backup over the file or repair the game in the R5Reloaded launcher.
+- The game is found in the usual install folders (`R5R Library`). If yours is somewhere else, enter its folder in Settings.
+
 ## Discord (optional)
 
 Open **Settings** (the sliders button in the title bar).
@@ -60,6 +69,8 @@ This produces `target\release\x76tracker.exe`.
 | `src/tracker.rs` | Downloads the ladders, saves change history, search. |
 | `src/view.rs` | Turns history into cards, charts and status lines (Today / Last 24h / All tracked). |
 | `src/main.rs` | Window, button handlers, the background check loop, single-instance check. |
+| `src/r5log.rs` | Reads fights from R5Reloaded's `script.log` (written by the optional patch). |
+| `src/r5patch.rs` | Adds the optional patch to R5Reloaded's script, or takes it out. |
 | `src/servers.rs` | x76's server list and the player-count history for the Servers tab. |
 | `src/discord.rs` | Discord settings, the profile widget's layout and updates, the encrypted bot token. |
 | `src/rpc.rs` | Rich Presence through Discord's local pipe, and spotting when a game is running. |
