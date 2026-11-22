@@ -1511,6 +1511,7 @@ pub fn discord_page(core: &Core) -> DiscordPage {
         r5_found: r5_dir.is_some(),
         ql_log: core.qllog == Some(true),
         recap_auto: core.state.settings.get("recapAuto").and_then(serde_json::Value::as_bool).unwrap_or(true),
+        notify: core.notify_on(),
         players_r5: model(r5_names.into_iter().map(s).collect()),
         player_r5: r5_i,
         players_ql: model(ql_names.into_iter().map(s).collect()),

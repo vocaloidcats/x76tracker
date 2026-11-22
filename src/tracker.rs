@@ -70,7 +70,7 @@ pub fn key_of(game: &str, id: &str) -> String {
 
 // ------------------------------------------------------------------ data shapes
 /// One player as the ladder shows them right now (both games normalised to this).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Player {
     pub id: String,
     pub name: String,
@@ -294,6 +294,56 @@ pub fn search(board: &Board, game: Game, query: &str, tracked: &HashSet<String>,
     (all, total)
 }
 
+// ------------------------------------------------------------------ notifications
+/// Something worth a notification (only made while notifications are on in Settings).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Note {
+    pub title: String,
+    pub body: String,
+    /// A tier to show its emblem, or empty.
+    pub tier: String,
+    /// 1 good news, -1 bad, 0 neither.
+    pub dir: i32,
+}
+
+/// Notifications from one ladder check, for your player (`me`) in one game: a tier change, the
+/// best rank milestone reached, and passing (or being passed by) another tracked player.
+pub fn notes_for(game: Game, me: &str, before: &HashMap<String, Player>, after: &HashMap<String, Player>) -> Vec<Note> {
+    let (Some(b), Some(a)) = (before.get(me), after.get(me)) else { return Vec::new() };
+    let mut out = Vec::new();
+    if a.tier != b.tier && !a.tier.is_empty() && !b.tier.is_empty() {
+        let up = match (a.points, b.points) {
+            (Some(x), Some(y)) if x != y => x > y,
+            _ => a.rank < b.rank,
+        };
+        out.push(Note {
+            title: a.tier.clone(),
+            body: format!("{} from {} · {}", if up { "Up" } else { "Down" }, b.tier, game.label()),
+            tier: a.tier.clone(),
+            dir: if up { 1 } else { -1 },
+        });
+    }
+    if let Some(th) = [1, 3, 5, 10, 25, 50, 100, 250, 500, 1000].into_iter().find(|&th| b.rank > th && a.rank <= th) {
+        out.push(Note {
+            title: if th == 1 { "#1".into() } else { format!("Top {th}") },
+            body: format!("#{} on the {} ladder", a.rank, game.label()),
+            tier: a.tier.clone(),
+            dir: 1,
+        });
+    }
+    let mut others: Vec<(&String, &Player)> = before.iter().filter(|(id, _)| id.as_str() != me).collect();
+    others.sort_by_key(|(_, p)| p.rank);
+    for (id, ob) in others {
+        let Some(oa) = after.get(id) else { continue };
+        if b.rank > ob.rank && a.rank < oa.rank {
+            out.push(Note { title: format!("You passed {}", oa.name), body: format!("You're #{} · {}", a.rank, game.label()), tier: String::new(), dir: 1 });
+        } else if b.rank < ob.rank && a.rank > oa.rank {
+            out.push(Note { title: format!("{} passed you", oa.name), body: format!("You're #{} · {}", a.rank, game.label()), tier: String::new(), dir: -1 });
+        }
+    }
+    out
+}
+
 // ------------------------------------------------------------------ game sessions
 /// One stretch of playing: from the game starting (or x76tracker noticing it) to it closing.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -362,6 +412,8 @@ pub struct Core {
     pub sessions: Vec<Session>,
     pub sessions_file: PathBuf,
     pub playing: Option<(Game, f64)>,
+    /// Notifications waiting for the app to show them.
+    pub notes: Vec<Note>,
     /// Share card export: running, the last outcome (is an error, text), the last saved file.
     pub share_busy: bool,
     pub share_note: Option<(bool, String)>,
@@ -407,6 +459,7 @@ impl Shared {
                 sessions,
                 sessions_file,
                 playing: None,
+                notes: Vec::new(),
                 profile: None,
                 profile_busy: false,
                 profile_error: None,
@@ -624,6 +677,19 @@ impl Shared {
                     core.sessions.drain(..extra);
                 }
                 save_sessions(&core.sessions_file, &core.sessions);
+                if core.notify_on() {
+                    let fights = if g == Game::Ql { &core.ql_fights } else { &core.fights };
+                    let (w, l) = fights.iter().filter(|f| f.t >= start && f.t <= t).fold((0, 0), |(w, l), f| if f.kind == "kill" { (w + 1, l) } else { (w, l + 1) });
+                    let mins = ((t - start) / 60.0).round() as i64;
+                    let long = if mins < 60 { format!("{mins} min") } else { format!("{}h {}m", mins / 60, mins % 60) };
+                    let record = if w + l > 0 { format!(" · {w}–{l}") } else { String::new() };
+                    core.notes.push(Note {
+                        title: "Session recap".into(),
+                        body: format!("{} · {long}{record}", g.label()),
+                        tier: String::new(),
+                        dir: (w - l as i32).signum(),
+                    });
+                }
                 Some(core.sessions.len() - 1)
             }
             _ => None,
@@ -793,11 +859,26 @@ impl Core {
         true
     }
 
+    pub fn notify_on(&self) -> bool {
+        self.state.settings.get("notify").and_then(Value::as_bool).unwrap_or(false)
+    }
+
     fn apply(&mut self, game: Game, board: &Board) {
         let favs: Vec<Favorite> = self.state.favorites.iter().filter(|f| f.game == game.id()).cloned().collect();
+        let standing = |core: &Core| -> HashMap<String, Player> {
+            favs.iter().filter_map(|f| core.latest.get(&key_of(game.id(), &f.id)).cloned().flatten().map(|p| (f.id.clone(), p))).collect()
+        };
+        let before = standing(self);
         let mut changed = false;
         for fav in &favs {
             changed |= self.record(game, fav, board, board.t);
+        }
+        if self.notify_on() {
+            if let Some(me) = crate::discord::Config::load(self).player(self, game) {
+                let after = standing(self);
+                let notes = notes_for(game, &me, &before, &after);
+                self.notes.extend(notes);
+            }
         }
         if changed {
             let _ = self.save();
@@ -919,5 +1000,35 @@ mod session_tests {
         assert_eq!(shared.watch_game(None), None);
         assert_eq!(shared.lock().sessions.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod note_tests {
+    use super::*;
+
+    fn player(name: &str, rank: i64, points: i64, tier: &str) -> Player {
+        Player { id: name.into(), name: name.into(), rank, points: Some(points), tier: tier.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn notes_for_tiers_milestones_and_passing() {
+        let before: HashMap<String, Player> = [("me", player("me", 104, 9900, "Diamond III")), ("pal", player("pal", 101, 9950, "Diamond III"))]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let after: HashMap<String, Player> = [("me", player("me", 99, 10010, "Diamond II")), ("pal", player("pal", 102, 9950, "Diamond III"))]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let notes = notes_for(Game::Ql, "me", &before, &after);
+        let titles: Vec<&str> = notes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(titles, ["Diamond II", "Top 100", "You passed pal"]);
+        assert_eq!(notes[0].body, "Up from Diamond III · Quake Live");
+        // and the other way round
+        let back = notes_for(Game::Ql, "me", &after, &before);
+        let titles: Vec<&str> = back.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(titles, ["Diamond III", "pal passed you"]);
+        assert!(notes_for(Game::Ql, "nobody", &before, &after).is_empty());
     }
 }

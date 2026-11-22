@@ -28,7 +28,8 @@ mod view;
 use serde_json::Value;
 use slint::ComponentHandle;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +41,11 @@ thread_local! {
     static UI: RefCell<UiState> = RefCell::new(UiState::default());
     // whether profile pictures are loaded: (avatar, banner)
     static PICS: RefCell<(bool, bool)> = const { RefCell::new((false, false)) };
+    /// The notification window (made once, reused), notifications waiting their turn, and whether
+    /// one is on screen.
+    static TOAST: RefCell<Option<Toast>> = const { RefCell::new(None) };
+    static TOAST_QUEUE: RefCell<VecDeque<tracker::Note>> = const { RefCell::new(VecDeque::new()) };
+    static TOAST_BUSY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     // what the Discord settings page was last built from (see set_discord_page)
     static DISCORD_SIG: RefCell<String> = const { RefCell::new(String::new()) };
     // What's new pictures, decoded (cleared when the menu closes)
@@ -231,6 +237,7 @@ fn period_of(core: &tracker::Core) -> Period {
 // ------------------------------------------------------------------ rendering
 /// Rebuilds both game columns from the tracker state. Runs after checks and user actions.
 fn refresh(app: &AppWindow, shared: &Shared) {
+    deliver_notes(app, shared);
     let mut core = shared.lock();
     let fresh = std::mem::take(&mut core.fresh);
     let period = period_of(&core);
@@ -310,7 +317,109 @@ fn read_layout_bg(app: &AppWindow, shared: &Arc<Shared>) {
 }
 
 /// Cheap per-second update of the "live · 12s ago" and per-game status lines.
+/// Set while the notification window is being created: the window attributes hook then makes it
+/// one that doesn't take focus when shown and stays out of the taskbar.
+static OVERLAY_NEXT: AtomicBool = AtomicBool::new(false);
+
+/// Shows the notifications that came in, one after another.
+fn deliver_notes(app: &AppWindow, shared: &Shared) {
+    let notes = std::mem::take(&mut shared.lock().notes);
+    if notes.is_empty() {
+        return;
+    }
+    TOAST_QUEUE.with(|q| q.borrow_mut().extend(notes));
+    if !TOAST_BUSY.with(|b| b.get()) {
+        show_next_toast(app.as_weak());
+    }
+}
+
+/// Slides the next notification in at the bottom right of the screen (over a game too, without
+/// taking focus), keeps it there a few seconds, slides it out, then shows the one after.
+fn show_next_toast(app: slint::Weak<AppWindow>) {
+    let Some(note) = TOAST_QUEUE.with(|q| q.borrow_mut().pop_front()) else {
+        TOAST_BUSY.with(|b| b.set(false));
+        return;
+    };
+    let Some(main) = app.upgrade() else { return };
+    TOAST_BUSY.with(|b| b.set(true));
+    let toast = TOAST.with(|t| {
+        if t.borrow().is_none() {
+            OVERLAY_NEXT.store(true, Ordering::SeqCst);
+            match Toast::new() {
+                Ok(w) => {
+                    let a = app.clone();
+                    // a click brings x76tracker up
+                    w.on_clicked(move || {
+                        if let Some(m) = a.upgrade() {
+                            let _ = m.show();
+                            win::focus_existing();
+                        }
+                    });
+                    *t.borrow_mut() = Some(w);
+                }
+                Err(_) => return None,
+            }
+        }
+        t.borrow().as_ref().map(|w| w.clone_strong())
+    });
+    let Some(toast) = toast else {
+        TOAST_BUSY.with(|b| b.set(false));
+        return;
+    };
+    toast.global::<Theme>().set_dark(main.global::<Theme>().get_dark());
+    toast.global::<RankIcons>().set_icons(main.global::<RankIcons>().get_icons());
+    toast.set_heading(note.title.into());
+    toast.set_body(note.body.into());
+    toast.set_tier_key(if note.tier.is_empty() { -1 } else { view::tier_key(&note.tier) });
+    toast.set_dir(note.dir);
+    // where it goes: the bottom right of the main screen's work area (above the taskbar)
+    let scale = main.window().scale_factor();
+    let (w, h) = ((360.0 * scale).round() as i32, (76.0 * scale).round() as i32);
+    let margin = (20.0 * scale).round() as i32;
+    let (_, _, right, bottom) = win::work_area().unwrap_or((0, 0, 1920, 1080));
+    let (x_end, y) = (right - w - margin, bottom - h - margin);
+    let x_start = right - (w / 6);
+    toast.window().set_position(slint::PhysicalPosition::new(x_start, y));
+    let _ = toast.show();
+    // slide in (eased), wait, slide out, hide, next
+    let started = std::time::Instant::now();
+    let timer = std::rc::Rc::new(slint::Timer::default());
+    let keep = timer.clone();
+    let t2 = toast.clone_strong();
+    let styled = std::cell::Cell::new(false);
+    timer.start(slint::TimerMode::Repeated, Duration::from_millis(16), move || {
+        // the native window only exists once the event loop has made it: then make it one that
+        // clicks can't activate (it was already shown without taking focus)
+        if !styled.get() {
+            use slint::winit_030::WinitWindowAccessor;
+            styled.set(t2.window().with_winit_window(|ww| win::no_activate(ww)).is_some());
+        }
+        let ms = started.elapsed().as_millis() as f64;
+        const IN: f64 = 260.0;
+        const STAY: f64 = 5200.0;
+        const OUT: f64 = 220.0;
+        let p = if ms < IN {
+            1.0 - (1.0 - ms / IN).powi(3)
+        } else if ms < IN + STAY {
+            1.0
+        } else if ms < IN + STAY + OUT {
+            let k = (ms - IN - STAY) / OUT;
+            1.0 - k * k * k
+        } else {
+            let _ = t2.hide();
+            keep.stop();
+            let a = app.clone();
+            slint::Timer::single_shot(Duration::from_millis(250), move || show_next_toast(a));
+            return;
+        };
+        let x = x_start as f64 + (x_end - x_start) as f64 * p;
+        t2.window().set_position(slint::PhysicalPosition::new(x.round() as i32, y));
+    });
+    std::mem::forget(timer); // it stops itself; the clone inside keeps it alive until then
+}
+
 fn tick(app: &AppWindow, shared: &Shared) {
+    deliver_notes(app, shared);
     // keep the maximize/restore icon right after Win+Up, snapping, or a double-click
     app.global::<WindowCtl>().set_maximized(app.window().is_maximized());
     let core = shared.lock();
@@ -630,6 +739,29 @@ fn wire(app: &AppWindow, shared: &Arc<Shared>) {
             });
             if let Some(app) = w.upgrade() {
                 refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_notify({
+        let (w, s) = ctx!();
+        move |on| {
+            s.lock().set_setting("notify", on.into());
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_notify_test({
+        let (w, s) = ctx!();
+        move || {
+            s.lock().notes.push(tracker::Note {
+                title: "Notifications are on".into(),
+                body: "This is how they look over a game.".into(),
+                tier: String::new(),
+                dir: 0,
+            });
+            if let Some(app) = w.upgrade() {
+                deliver_notes(&app, &s);
             }
         }
     });
@@ -1271,6 +1403,41 @@ mod win {
             }
         }
     }
+
+    #[repr(C)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn SystemParametersInfoW(action: u32, param: u32, out: *mut c_void, ini: u32) -> i32;
+        fn GetWindowLongPtrW(hwnd: *mut c_void, index: i32) -> isize;
+        fn SetWindowLongPtrW(hwnd: *mut c_void, index: i32, value: isize) -> isize;
+    }
+
+    /// The main screen's work area (without the taskbar), in pixels: (left, top, right, bottom).
+    pub fn work_area() -> Option<(i32, i32, i32, i32)> {
+        let mut r = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+        let ok = unsafe { SystemParametersInfoW(0x0030, 0, &mut r as *mut Rect as *mut c_void, 0) }; // SPI_GETWORKAREA
+        (ok != 0 && r.right > r.left).then_some((r.left, r.top, r.right, r.bottom))
+    }
+
+    /// A window that clicks can't activate and that isn't in Alt+Tab: for the notification card.
+    pub fn no_activate(w: &slint::winit_030::winit::window::Window) {
+        use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = w.window_handle() else { return };
+        let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+        let hwnd = h.hwnd.get() as *mut c_void;
+        unsafe {
+            let ex = GetWindowLongPtrW(hwnd, -20); // GWL_EXSTYLE
+            // + WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, − WS_EX_APPWINDOW (which would keep it in the taskbar)
+            SetWindowLongPtrW(hwnd, -20, (ex & !0x0004_0000) | 0x0800_0000 | 0x80);
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -1279,6 +1446,10 @@ mod win {
         eprintln!("{text}");
     }
     pub fn focus_existing() {}
+    pub fn work_area() -> Option<(i32, i32, i32, i32)> {
+        None
+    }
+    pub fn no_activate(_: &slint::winit_030::winit::window::Window) {}
 }
 
 // ------------------------------------------------------------------ screenshot mode
@@ -1713,11 +1884,15 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         .backend_name("winit".into())
         .renderer_name("software".into())
         .with_winit_window_attributes_hook(|attrs| {
+            let overlay = OVERLAY_NEXT.swap(false, Ordering::SeqCst);
             #[cfg(windows)]
             let attrs = {
                 use slint::winit_030::winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
-                attrs.with_undecorated_shadow(true).with_corner_preference(CornerPreference::Round)
+                let attrs = attrs.with_undecorated_shadow(true).with_corner_preference(CornerPreference::Round);
+                if overlay { attrs.with_skip_taskbar(true).with_active(false) } else { attrs }
             };
+            #[cfg(not(windows))]
+            let attrs = if overlay { attrs.with_active(false) } else { attrs };
             attrs
         })
         .select()?;
@@ -1725,6 +1900,22 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     update::clean_up(&data_dir.join("update")); // the old exe and downloads from the last update
     let shared = Shared::new(data_file);
     let app = AppWindow::new()?;
+    // docs builds: show one notification without the main window, then quit (to check it doesn't take focus)
+    #[cfg(feature = "docs")]
+    if args.iter().any(|a| a == "--notify-test") {
+        shared.lock().notes.push(tracker::Note {
+            title: "Notifications are on".into(),
+            body: "This is how they look over a game.".into(),
+            tier: "Diamond III".into(),
+            dir: 1,
+        });
+        deliver_notes(&app, &shared);
+        slint::Timer::single_shot(Duration::from_secs(8), || {
+            let _ = slint::quit_event_loop();
+        });
+        slint::run_event_loop_until_quit()?;
+        return Ok(());
+    }
     wire(&app, &shared);
     wire_window(&app);
     startup(&app, &shared);

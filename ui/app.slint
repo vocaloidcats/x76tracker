@@ -81,7 +81,7 @@ export struct ProfileCard {
 export struct WidgetSlot { key: string, kind: int, surface: string, name: string, source: int, custom: string, is-custom: bool }
 export struct StaticText { surface: string, name: string, text: string }
 export struct DiscordPage {
-    rpc: bool, rpc-app: string, r5-patch: bool, r5-found: bool, ql-log: bool, recap-auto: bool,
+    rpc: bool, rpc-app: string, r5-patch: bool, r5-found: bool, ql-log: bool, recap-auto: bool, notify: bool,
     players-r5: [string], player-r5: int, players-ql: [string], player-ql: int,
     widget: bool, app-id: string, user-id: string, has-token: bool, widget-rpc: bool,
     slots: [WidgetSlot], statics: [StaticText],
@@ -127,6 +127,8 @@ export global Actions {
     callback close-recap();
     callback recap-step(dir: int);
     callback recap-auto(on: bool);
+    callback notify(on: bool);
+    callback notify-test();
     callback profile-link(handle: string);
     callback profile-unlink();
     callback open-x76();
@@ -2815,6 +2817,15 @@ component SettingsPanel inherits Rectangle {
                         body: "When R5Reloaded or Quake Live closes, x76tracker opens a summary of the session: wins and losses, Elo, points and rank, your best win, nemesis and accuracy. Your card's last session link opens it again.";
                         toggled(v) => { Actions.recap-auto(v); }
                     }
+                    Rectangle { height: 1px; background: Theme.line-1; }
+                    Eyebrow { text: "NOTIFICATIONS"; }
+                    SettingRow {
+                        on: root.d.notify;
+                        title: "Show notifications over my games";
+                        body: "A small card slides in at the bottom right for your tier changing, rank milestones, passing or being passed by players you track, and session recaps. It shows over the game without taking focus. Your players are the ones picked above.";
+                        toggled(v) => { Actions.notify(v); }
+                    }
+                    HorizontalLayout { alignment: start; Button { text: "Preview"; kind: 1; clicked => { Actions.notify-test(); } } }
                 }
                 }
 
@@ -3044,6 +3055,50 @@ component ResizeEdge inherits TouchArea {
 }
 
 // ---------------------------------------------------------------- window
+// ---------------------------------------------------------------- notification (its own small window)
+// Shown in a screen corner over games: it never takes focus (x76tracker sets that up when it creates
+// the window) and slides in and out by moving the window itself.
+export component Toast inherits Window {
+    title: "x76tracker notification";
+    no-frame: true;
+    always-on-top: true;
+    width: 360px;
+    height: 76px;
+    background: Theme.canvas;
+    in property <string> heading;
+    in property <string> body;
+    in property <int> tier-key: -1;
+    in property <int> dir;
+    callback clicked();
+    TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    Rectangle {
+        border-width: 1px;
+        border-color: Theme.line-2;
+        border-radius: 8px;
+    }
+    // the side bar says good news, bad news or neither at a glance
+    Rectangle {
+        x: 0;
+        width: 4px;
+        height: parent.height;
+        background: root.dir > 0 ? Theme.positive : root.dir < 0 ? Theme.danger : Theme.accent-fg;
+    }
+    HorizontalLayout {
+        padding-left: 18px;
+        padding-right: 16px;
+        spacing: 12px;
+        if root.tier-key >= 0: VerticalLayout { alignment: center; horizontal-stretch: 0; Gem { tier-key: root.tier-key; size: 38px; } }
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Mono { text: "x76tracker"; font-size: 10px; }
+            Text { text: root.heading; font-size: 15px; font-weight: 600; letter-spacing: -0.2px; color: Theme.fg; overflow: elide; }
+            Text { text: root.body; font-size: 12.5px; color: Theme.fg-muted; overflow: elide; }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     in property <GameData> ql;
     in property <GameData> r5;
