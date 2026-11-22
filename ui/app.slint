@@ -19,7 +19,7 @@ export struct ChartData { ticks: [Tick], points: [ChartPoint], lookup: [int], st
 export struct Opponent { name: string, elo: string, tier-key: int, gap: string, gap-dir: int, won: bool, upset: bool }
 // kind: 0 ladder change (W/L from its counts), 1 fight from the game log, 2 x76 booking Elo/points,
 // 3 predicted next points booking
-export struct EventRow { kind: int, label: string, id: string, when: string, when-full: string, wins: int, losses: int, note: string, opponents: [Opponent], more: string, elo: string, elo-dir: int, pts: string, pts-dir: int }
+export struct EventRow { fresh: bool, kind: int, label: string, id: string, when: string, when-full: string, wins: int, losses: int, note: string, opponents: [Opponent], more: string, elo: string, elo-dir: int, pts: string, pts-dir: int }
 export struct PlayerCard {
     game: string, id: string, key: string, name: string, link: bool,
     rank: string, top: int, tier: string, tier-key: int, moved: string, moved-dir: int, missing: bool,
@@ -31,6 +31,8 @@ export struct PlayerCard {
     events: [EventRow], total-events: int,
     kd: string, kd-ratio: string, acc: string, site24: string, site24-dir: int, site24-places: string, site24-places-dir: int,
     first: bool, last: bool,
+    // numbers for the ticking points and Elo: what showed last time, and the new values
+    has-num: bool, points-num: float, points-from: float, elo-num: float, elo-from: float,
 }
 export struct SearchResult { id: string, rank: string, name: string, tier: string, tier-key: int, points: string, alias: string, tracked: bool }
 export struct GameData { id: string, label: string, mode: string, placeholder: string, players: [PlayerCard] }
@@ -259,7 +261,7 @@ component Button inherits Rectangle {
         : (btn-ta.has-hover && root.enabled ? (Theme.dark ? #ffffff : #3a3735) : Theme.action-bg);
     border-width: 1px;
     border-color: root.kind == 1 ? Theme.line-2 : self.background;
-    opacity: root.enabled ? 1 : 0.55;
+    opacity: root.enabled ? (btn-ta.pressed ? 0.72 : 1) : 0.55;
     HorizontalLayout {
         padding-left: 14px;
         padding-right: 14px;
@@ -289,7 +291,7 @@ component RoundButton inherits Rectangle {
     height: 26px;
     border-radius: 13px;
     background: rb-ta.has-hover && root.enabled ? Theme.canvas : Theme.surface;
-    opacity: root.enabled ? 1 : 0.35;
+    opacity: root.enabled ? (rb-ta.pressed ? 0.6 : 1) : 0.35;
     Path {
         width: 11px;
         height: 11px;
@@ -355,35 +357,71 @@ component Chip inherits Rectangle {
     }
 }
 
-// x76's rainbow. Each time `play` turns on (the pointer arrives), one wave washes through it:
-// eased in and out, never linear. A finished wave is exactly one rainbow-width of travel, so it
-// comes to rest on the same picture it started from: no jump at the end, no jitter on hover.
+// x76's rainbow, with a wave like one running up a beach: while `play` (the pointer is over it),
+// tilted colour bands ease forward one rainbow-width over 2 s, each band swelling in turn as the
+// crest passes, with a soft bright foam riding it. It ends on exactly the picture it started from,
+// and finishes even if the pointer leaves halfway. (Tuned in the Rainbow Wave mockup: tilt 132°, swell 1,
+// stagger 0.07, foam 0.4.)
 component RainbowFill inherits Rectangle {
     in property <bool> play;
-    property <int> waves: 0;
-    // whole numbers at rest; the animation carries it smoothly to the next one
-    property <float> wave: root.waves;
-    animate wave { duration: 1500ms; easing: cubic-bezier(0.6, 0.0, 0.2, 1.0); }
-    changed play => {
-        if (root.play) {
-            root.waves += 1;
+    // t: linear progress, 0 → 1 while hovered, back to 0 once the pointer leaves (timers run
+    // reliably in the real window; a hover-started property animation did not)
+    property <float> t: 0;
+    // a started wave always finishes, even if the pointer leaves; at rest again (t = 1 looks
+    // exactly like 0) it resets once the pointer is gone, ready for the next hover
+    // a finished wave goes straight back to t = 0 (the exact starting picture) and `done` stops it
+    // replaying until the pointer has left
+    property <bool> done;
+    Timer {
+        interval: 16ms;
+        running: (root.play && !root.done) || root.t > 0;
+        triggered => {
+            root.t += 16 / 2000;
+            if (root.t >= 1) {
+                root.t = 0;
+                root.done = true;
+            }
         }
     }
-    property <float> f: root.wave - Math.floor(root.wave);
-    // an invisible opacity change makes partial redraw repaint the moving gradient
-    opacity: 1 - root.f * 0.001;
-    // the colours drift right as f goes 0 → 1 (one full rainbow), then f is 0 again
-    property <float> s0: root.f - 1;
-    property <float> s1: root.f - 0.75;
-    property <float> s2: root.f - 0.5;
-    property <float> s3: root.f - 0.25;
-    property <float> s4: root.f;
-    property <float> s5: root.f + 0.25;
-    property <float> s6: root.f + 0.5;
-    property <float> s7: root.f + 0.75;
-    property <float> s8: root.f + 1;
-    background: @linear-gradient(90deg, #6fe3ff root.s0, #9d7bff root.s1, #f07ae0 root.s2, #c6f07a root.s3,
+    Timer {
+        interval: 16ms;
+        running: !root.play && root.done;
+        triggered => { root.done = false; }
+    }
+    // eased in and out (cubic)
+    property <float> e: root.t < 0.5 ? 4 * root.t * root.t * root.t : 1 - Math.pow(-2 * root.t + 2, 3) / 2;
+    // each band swells (up to double width) while the crest passes it, staggered 0.07 apart
+    property <float> h0: Math.pow(Math.sin(max(0, min(1, root.t / 0.79)) * 180deg), 2);
+    property <float> h1: Math.pow(Math.sin(max(0, min(1, (root.t - 0.07) / 0.79)) * 180deg), 2);
+    property <float> h2: Math.pow(Math.sin(max(0, min(1, (root.t - 0.14) / 0.79)) * 180deg), 2);
+    property <float> h3: Math.pow(Math.sin(max(0, min(1, (root.t - 0.21) / 0.79)) * 180deg), 2);
+    property <float> sum: 4 + root.h0 + root.h1 + root.h2 + root.h3;
+    // band widths, normalised so one rainbow always spans exactly 1
+    property <float> n0: (1 + root.h0) / root.sum;
+    property <float> n1: (1 + root.h1) / root.sum;
+    property <float> n2: (1 + root.h2) / root.sum;
+    property <float> s0: root.e - 1;
+    property <float> s1: root.s0 + root.n0;
+    property <float> s2: root.s1 + root.n1;
+    property <float> s3: root.s2 + root.n2;
+    property <float> s4: root.e;
+    property <float> s5: root.s4 + root.n0;
+    property <float> s6: root.s5 + root.n1;
+    property <float> s7: root.s6 + root.n2;
+    property <float> s8: root.e + 1;
+    background: @linear-gradient(132deg, #6fe3ff root.s0, #9d7bff root.s1, #f07ae0 root.s2, #c6f07a root.s3,
         #6fe3ff root.s4, #9d7bff root.s5, #f07ae0 root.s6, #c6f07a root.s7, #6fe3ff root.s8);
+    // foam: a soft bright band riding the crest, strongest mid-wave
+    property <float> foam: 0.4 * Math.sin(root.t * 180deg);
+    property <float> c: -0.2 + 1.4 * root.e;
+    property <float> c0: root.c - 0.14;
+    property <float> c2: root.c + 0.14;
+    if root.t > 0 && root.t < 1: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: parent.border-radius;
+        background: @linear-gradient(132deg, #ffffff00 root.c0, rgba(255, 255, 255, root.foam) root.c, #ffffff00 root.c2);
+    }
 }
 
 component SearchBox inherits Rectangle {
@@ -571,6 +609,29 @@ component Chart inherits Rectangle {
 // ---------------------------------------------------------------- player card
 component PlayerCardView inherits Rectangle {
     in property <PlayerCard> p;
+    // points and Elo tick from what was showing to the new value (eased, on a Timer)
+    property <float> pts: root.p.points-from;
+    property <float> elo-v: root.p.elo-from;
+    Timer {
+        interval: 16ms;
+        running: root.p.has-num && (abs(root.pts - root.p.points-num) > 0.4 || abs(root.elo-v - root.p.elo-num) > 0.04);
+        triggered => {
+            root.pts += (root.p.points-num - root.pts) * 0.12;
+            root.elo-v += (root.p.elo-num - root.elo-v) * 0.12;
+            if (abs(root.pts - root.p.points-num) <= 0.4) { root.pts = root.p.points-num; }
+            if (abs(root.elo-v - root.p.elo-num) <= 0.04) { root.elo-v = root.p.elo-num; }
+        }
+    }
+    pure function pad3(v: int) -> string { return v < 10 ? "00" + v : v < 100 ? "0" + v : "" + v; }
+    // 17433 → "17,433"
+    pure function grouped(v: int) -> string {
+        return v >= 1000000 ? Math.floor(v / 1000000) + "," + root.pad3(Math.mod(Math.floor(v / 1000), 1000)) + "," + root.pad3(Math.mod(v, 1000))
+            : v >= 1000 ? Math.floor(v / 1000) + "," + root.pad3(Math.mod(v, 1000)) : "" + v;
+    }
+    // 1224.23 → "1,224.2"
+    pure function tenths(v: float) -> string {
+        return root.grouped(Math.floor(Math.round(v * 10) / 10)) + "." + Math.mod(Math.round(v * 10), 10);
+    }
     in property <string> period-word;
     property <string> period-upper: root.period-word == "today" ? "TODAY" : root.period-word == "last 24h" ? "LAST 24H" : "SINCE TRACKING";
     property <bool> faded;
@@ -708,7 +769,7 @@ component PlayerCardView inherits Rectangle {
                 HorizontalLayout {
                     alignment: start;
                     spacing: 1px;
-                    Text { text: root.p.points; font-size: 26px; font-weight: 600; letter-spacing: -0.52px; color: Theme.fg; }
+                    Text { text: root.p.has-num ? root.grouped(Math.round(root.pts)) : root.p.points; font-size: 26px; font-weight: 600; letter-spacing: -0.52px; color: Theme.fg; }
                     VerticalLayout { alignment: end; padding-bottom: 5px; Text { text: "P"; font-size: 15px; font-weight: 600; color: Theme.fg-muted; } }
                 }
                 HorizontalLayout {
@@ -722,7 +783,7 @@ component PlayerCardView inherits Rectangle {
             VerticalLayout {
                 horizontal-stretch: 1;
                 Eyebrow { text: "ELO"; }
-                Text { text: root.p.elo; font-size: 26px; font-weight: 600; letter-spacing: -0.52px; color: Theme.fg; }
+                Text { text: root.p.has-num ? root.tenths(root.elo-v) : root.p.elo; font-size: 26px; font-weight: 600; letter-spacing: -0.52px; color: Theme.fg; }
                 HorizontalLayout { alignment: start; Delta { text: root.p.elo-delta; dir: root.p.elo-dir; } }
             }
             Rectangle { width: 1px; background: Theme.line-1; }
@@ -793,6 +854,11 @@ component PlayerCardView inherits Rectangle {
                 Eyebrow { text: "points"; width: 76px; horizontal-alignment: right; font-size: 10.5px; color: Theme.fg-faint; }
             }
             for e in root.p.events: Rectangle {
+                // a result that wasn't on the board before fades in and slides down (Timer tween)
+                property <float> k: e.fresh ? 0 : 1;
+                property <float> ek: 1 - Math.pow(1 - self.k, 3);
+                opacity: self.ek;
+                Timer { interval: 16ms; running: parent.k < 1; triggered => { parent.k = min(1, parent.k + 16 / 420); } }
                 height: 33px;
                 background: e.kind == 3 ? transparent : row-ta.has-hover && e.id != "" ? Theme.surface.mix(Theme.fg, 0.93) : Theme.surface;
                 border-radius: 8px;
@@ -804,6 +870,7 @@ component PlayerCardView inherits Rectangle {
                     clicked => { if (e.id != "") { Actions.open-event(root.p.key, e.id); } }
                 }
                 HorizontalLayout {
+                    y: (1 - parent.ek) * -12px;
                     padding-left: 10px;
                     padding-right: 10px;
                     spacing: 8px;
@@ -1417,18 +1484,18 @@ component SharePanel inherits Rectangle {
     in property <bool> busy;
     in property <bool> saved;
     callback close();
-    property <bool> shown;
-    init => { root.shown = true; }
-    opacity: root.shown ? 1 : 0;
-    animate opacity { duration: 160ms; easing: ease-out; }
+    // opening: fade in and rise (a Timer tween; Slint's `animate` jumps to the end in the real window)
+    property <float> k: 0;
+    Timer { interval: 16ms; running: root.k < 1; triggered => { root.k = min(1, root.k + 16 / 240); } }
+    property <float> ek: 1 - Math.pow(1 - root.k, 3);
+    opacity: root.ek;
     background: #000000a6;
     TouchArea { clicked => { root.close(); } }
     panel := Rectangle {
         width: 640px + 48px;
         height: body.preferred-height;
         x: (root.width - self.width) / 2;
-        y: max(16px, (root.height - self.height) / 2) + (root.shown ? 0px : 18px);
-        animate y { duration: 220ms; easing: ease-out; }
+        y: max(16px, (root.height - self.height) / 2) + (1 - root.ek) * 22px;
         background: Theme.canvas;
         border-radius: 16px;
         border-width: 1px;
@@ -1609,10 +1676,11 @@ component FightCard inherits Rectangle {
 
 component EventPanel inherits Rectangle {
     in property <EventDetail> d;
-    property <bool> shown;
-    init => { root.shown = true; }
-    opacity: root.shown ? 1 : 0;
-    animate opacity { duration: 160ms; easing: ease-out; }
+    // opening: fade in and rise (a Timer tween; Slint's `animate` jumps to the end in the real window)
+    property <float> k: 0;
+    Timer { interval: 16ms; running: root.k < 1; triggered => { root.k = min(1, root.k + 16 / 240); } }
+    property <float> ek: 1 - Math.pow(1 - root.k, 3);
+    opacity: root.ek;
     background: #000000a6;
     // a click outside the panel closes it
     TouchArea { clicked => { Actions.close-event(); } }
@@ -1620,8 +1688,7 @@ component EventPanel inherits Rectangle {
         width: min(700px, root.width - 48px);
         height: min(root.height - 64px, body.preferred-height + 2px);
         x: (root.width - self.width) / 2;
-        y: (root.height - self.height) / 2 + (root.shown ? 0px : 18px);
-        animate y { duration: 220ms; easing: ease-out; }
+        y: (root.height - self.height) / 2 + (1 - root.ek) * 22px;
         background: Theme.canvas;
         border-radius: 16px;
         border-width: 1px;
@@ -1747,6 +1814,16 @@ component ServerRowView inherits Rectangle {
 
 component ServerColumn inherits VerticalLayout {
     in property <ServerGame> g;
+    // the player count eases to its new value (Timer tween)
+    property <float> shown-total: root.g.total;
+    Timer {
+        interval: 16ms;
+        running: abs(root.shown-total - root.g.total) > 0.4;
+        triggered => {
+            root.shown-total += (root.g.total - root.shown-total) * 0.15;
+            if (abs(root.shown-total - root.g.total) <= 0.4) { root.shown-total = root.g.total; }
+        }
+    }
     alignment: start;
     spacing: 14px;
     VerticalLayout {
@@ -1766,7 +1843,7 @@ component ServerColumn inherits VerticalLayout {
                 VerticalLayout {
                     horizontal-stretch: 0;
                     Eyebrow { text: "PLAYING NOW"; }
-                    Text { text: root.g.total; font-size: 44px; font-weight: 600; letter-spacing: -0.9px; color: Theme.fg; }
+                    Text { text: Math.round(root.shown-total); font-size: 44px; font-weight: 600; letter-spacing: -0.9px; color: Theme.fg; }
                 }
                 Rectangle { horizontal-stretch: 1; }
                 VerticalLayout {
@@ -1880,6 +1957,12 @@ component Select inherits Rectangle {
         width: max(root.width, 240px);
         height: min(root.options.length * 32px + 14px, 340px);
         Rectangle {
+            // drops in: fade and slide (Timer tween)
+            property <float> k: 0;
+            property <float> ek: 1 - Math.pow(1 - self.k, 3);
+            opacity: self.ek;
+            y: (self.ek - 1) * 8px;
+            Timer { interval: 16ms; running: parent.k < 1; triggered => { parent.k = min(1, parent.k + 16 / 170); } }
             background: Theme.canvas;
             border-radius: 8px;
             border-width: 1px;
@@ -2083,18 +2166,18 @@ component ChangelogMenu inherits Rectangle {
     pure function ink(kind: int) -> color {
         return kind == 0 ? Theme.positive : kind == 1 ? Theme.accent-fg : kind == 2 ? Theme.danger : Theme.fg-muted;
     }
-    property <bool> shown;
-    init => { root.shown = true; }
-    opacity: root.shown ? 1 : 0;
-    animate opacity { duration: 160ms; easing: ease-out; }
+    // opening: fade in and rise (a Timer tween; Slint's `animate` jumps to the end in the real window)
+    property <float> k: 0;
+    Timer { interval: 16ms; running: root.k < 1; triggered => { root.k = min(1, root.k + 16 / 240); } }
+    property <float> ek: 1 - Math.pow(1 - root.k, 3);
+    opacity: root.ek;
     background: #000000b3;
     TouchArea { clicked => { root.close(); } }
     panel := Rectangle {
         width: min(780px, root.width - 48px);
         height: root.height - 40px;
         x: (root.width - self.width) / 2;
-        y: 20px + (root.shown ? 0px : 24px);
-        animate y { duration: 240ms; easing: ease-out; }
+        y: 20px + (1 - root.ek) * 30px;
         background: Theme.canvas;
         border-radius: 16px;
         border-width: 1px;
@@ -2271,18 +2354,18 @@ component SettingsPanel inherits Rectangle {
     in-out property <int> tab;
     callback close();
     callback whats-new();
-    property <bool> shown;
-    init => { root.shown = true; }
-    opacity: root.shown ? 1 : 0;
-    animate opacity { duration: 160ms; easing: ease-out; }
+    // opening: fade in and rise (a Timer tween; Slint's `animate` jumps to the end in the real window)
+    property <float> k: 0;
+    Timer { interval: 16ms; running: root.k < 1; triggered => { root.k = min(1, root.k + 16 / 240); } }
+    property <float> ek: 1 - Math.pow(1 - root.k, 3);
+    opacity: root.ek;
     background: #000000a6;
     TouchArea { clicked => { root.close(); } }
     panel := Rectangle {
         width: min(780px, root.width - 48px);
         height: min(root.height - 64px, body.preferred-height + 2px);
         x: (root.width - self.width) / 2;
-        y: (root.height - self.height) / 2 + (root.shown ? 0px : 18px);
-        animate y { duration: 220ms; easing: ease-out; }
+        y: (root.height - self.height) / 2 + (1 - root.ek) * 22px;
         background: Theme.canvas;
         border-radius: 16px;
         border-width: 1px;
@@ -2315,7 +2398,17 @@ component SettingsPanel inherits Rectangle {
                 }
 
                 // ---------------------------------------- general: Rich Presence, whose numbers
-                if root.tab == 0: VerticalLayout {
+                if root.tab == 0: Rectangle {
+                    // switching here: fade in and slide up (Timer tween)
+                    property <float> k: 0;
+                    property <float> ek: 1 - Math.pow(1 - self.k, 3);
+                    opacity: self.ek;
+                    Timer { interval: 16ms; running: parent.k < 1; triggered => { parent.k = min(1, parent.k + 16 / 260); } }
+                    // the wrapper takes its content's height, so the page still lays out and scrolls
+                    min-height: tabbody1.min-height;
+                    preferred-height: tabbody1.preferred-height;
+                    tabbody1 := VerticalLayout {
+                        y: (1 - parent.ek) * 8px;
                     spacing: 16px;
                     Eyebrow { text: "RICH PRESENCE"; }
                     SettingRow {
@@ -2364,9 +2457,20 @@ component SettingsPanel inherits Rectangle {
                         Field { mono: true; placeholder: "the folder with r5apex.exe, e.g. C:\\R5R Library\\LIVE"; edited(t) => { Actions.r5-path(t); } }
                     }
                 }
+                }
 
                 // ---------------------------------------- the profile widget (apps that already have one)
-                if root.tab == 1: VerticalLayout {
+                if root.tab == 1: Rectangle {
+                    // switching here: fade in and slide up (Timer tween)
+                    property <float> k: 0;
+                    property <float> ek: 1 - Math.pow(1 - self.k, 3);
+                    opacity: self.ek;
+                    Timer { interval: 16ms; running: parent.k < 1; triggered => { parent.k = min(1, parent.k + 16 / 260); } }
+                    // the wrapper takes its content's height, so the page still lays out and scrolls
+                    min-height: tabbody2.min-height;
+                    preferred-height: tabbody2.preferred-height;
+                    tabbody2 := VerticalLayout {
+                        y: (1 - parent.ek) * 8px;
                     spacing: 16px;
                     Text {
                         text: "Already have a Discord app with a profile widget? x76tracker can fill the widget's User Data fields with your x76 stats. Discord stopped giving widgets to new apps, so this only works with an app that got one before the cutoff.";
@@ -2461,9 +2565,20 @@ component SettingsPanel inherits Rectangle {
                         }
                     }
                 }
+                }
 
                 // ---------------------------------------- updates and what's new
-                if root.tab == 2: VerticalLayout {
+                if root.tab == 2: Rectangle {
+                    // switching here: fade in and slide up (Timer tween)
+                    property <float> k: 0;
+                    property <float> ek: 1 - Math.pow(1 - self.k, 3);
+                    opacity: self.ek;
+                    Timer { interval: 16ms; running: parent.k < 1; triggered => { parent.k = min(1, parent.k + 16 / 260); } }
+                    // the wrapper takes its content's height, so the page still lays out and scrolls
+                    min-height: tabbody3.min-height;
+                    preferred-height: tabbody3.preferred-height;
+                    tabbody3 := VerticalLayout {
+                        y: (1 - parent.ek) * 8px;
                     spacing: 16px;
                     Text { text: "x76tracker " + root.u.version; font-size: 18px; font-weight: 600; color: Theme.fg; }
                     StatusLine { text: root.update-status; state: root.update-state; }
@@ -2502,6 +2617,7 @@ component SettingsPanel inherits Rectangle {
                         }
                         VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Open changelog"; kind: 1; clicked => { root.whats-new(); } } }
                     }
+                }
                 }
             }
         }
@@ -2694,6 +2810,8 @@ export component AppWindow inherits Window {
                             height: 7px;
                             border-radius: 3.5px;
                             background: root.live-state == 1 ? Theme.positive : root.live-state == 2 ? Theme.accent-fg : root.live-state == 3 ? Theme.danger : Theme.fg-faint;
+                            // breathes while a check is running
+                            opacity: root.live-state == 2 ? 0.35 + 0.65 * (1 + Math.sin(animation-tick() / 1ms * 0.4deg)) / 2 : 1;
                         }
                     }
                     // the status text gives way first (ellipsis) when the window gets narrow
@@ -2734,6 +2852,12 @@ export component AppWindow inherits Window {
                             y: sel.height + 6px;
                             width: 160px;
                             Rectangle {
+                                // drops in: fade and slide (Timer tween)
+                                property <float> k: 0;
+                                property <float> ek: 1 - Math.pow(1 - self.k, 3);
+                                opacity: self.ek;
+                                y: (self.ek - 1) * 8px;
+                                Timer { interval: 16ms; running: parent.k < 1; triggered => { parent.k = min(1, parent.k + 16 / 170); } }
                                 background: Theme.canvas;
                                 border-radius: 8px;
                                 border-width: 1px;
@@ -2898,7 +3022,17 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                         alignment: start;
 
-                        if root.tab == 0: VerticalLayout {
+                        if root.tab == 0: Rectangle {
+                            // switching here: fade in and slide up (Timer tween)
+                            property <float> k: 0;
+                            property <float> ek: 1 - Math.pow(1 - self.k, 3);
+                            opacity: self.ek;
+                            Timer { interval: 16ms; running: parent.k < 1; triggered => { parent.k = min(1, parent.k + 16 / 260); } }
+                            // the wrapper takes its content's height, so the page still lays out and scrolls
+                            min-height: tabbody4.min-height;
+                            preferred-height: tabbody4.preferred-height;
+                            tabbody4 := VerticalLayout {
+                                y: (1 - parent.ek) * 14px;
                             alignment: start;
                         // masthead
                         HorizontalLayout {
@@ -2993,7 +3127,18 @@ export component AppWindow inherits Window {
                         }
 
                         }
-                        if root.tab == 1: VerticalLayout {
+                        }
+                        if root.tab == 1: Rectangle {
+                            // switching here: fade in and slide up (Timer tween)
+                            property <float> k: 0;
+                            property <float> ek: 1 - Math.pow(1 - self.k, 3);
+                            opacity: self.ek;
+                            Timer { interval: 16ms; running: parent.k < 1; triggered => { parent.k = min(1, parent.k + 16 / 260); } }
+                            // the wrapper takes its content's height, so the page still lays out and scrolls
+                            min-height: tabbody5.min-height;
+                            preferred-height: tabbody5.preferred-height;
+                            tabbody5 := VerticalLayout {
+                                y: (1 - parent.ek) * 14px;
                             alignment: start;
                             HorizontalLayout {
                                 padding-top: 28px;
@@ -3040,6 +3185,7 @@ export component AppWindow inherits Window {
                                 ServerColumn { g: root.servers.ql; }
                                 ServerColumn { g: root.servers.r5; }
                             }
+                        }
                         }
                         HorizontalLayout {
                             padding-top: 48px;

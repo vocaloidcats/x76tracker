@@ -236,8 +236,21 @@ fn refresh(app: &AppWindow, shared: &Shared) {
     UI.with(|ui| {
         let mut ui = ui.borrow_mut();
         ui.flash = fresh;
-        app.set_ql(view::game_data(&core, Game::Ql, period, &ui));
-        app.set_r5(view::game_data(&core, Game::R5, period, &ui));
+        let ql = view::game_data(&core, Game::Ql, period, &ui);
+        let r5 = view::game_data(&core, Game::R5, period, &ui);
+        // remember what's on the boards now: next time only new results fade in, and numbers tick from here
+        for g in [&ql, &r5] {
+            use slint::Model;
+            for c in g.players.iter() {
+                let ids = ui.seen.entry(c.key.to_string()).or_default();
+                ids.extend(c.events.iter().map(|e| e.id.to_string()).filter(|id| !id.is_empty()));
+                if c.has_num {
+                    ui.shown_nums.insert(c.key.to_string(), (c.points_num as f64, c.elo_num as f64));
+                }
+            }
+        }
+        app.set_ql(ql);
+        app.set_r5(r5);
         ui.flash.clear();
     });
     app.set_servers(view::servers_page(&core));
@@ -1194,9 +1207,16 @@ mod screenshot {
 
     static CLOCK_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+    /// Moves the clock on in 16 ms steps, so Timer-driven motion (which fires once per step)
+    /// keeps real-time speed in screenshots and recordings.
     fn advance(ms: u64) {
-        CLOCK_MS.fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
-        slint::platform::update_timers_and_animations();
+        let mut left = ms;
+        while left > 0 {
+            let d = left.min(16);
+            CLOCK_MS.fetch_add(d, std::sync::atomic::Ordering::Relaxed);
+            slint::platform::update_timers_and_animations();
+            left -= d;
+        }
     }
 
     /// An animated PNG of the window (or part of it), frame by frame.
@@ -1208,6 +1228,8 @@ mod screenshot {
         /// frame at which the --click / --hover happens (otherwise before recording starts)
         pub click_at: Option<u32>,
         pub hover_at: Option<u32>,
+        /// frame at which new results "arrive": the newest two rows slide in, points and Elo tick
+        pub board_at: Option<u32>,
     }
 
     fn click(app: &AppWindow, (x, y): (f32, f32)) {
@@ -1380,6 +1402,28 @@ mod screenshot {
                         hover(&app, at);
                     }
                 }
+                if r.board_at == Some(i) {
+                    use slint::Model;
+                    let games = [app.get_ql(), app.get_r5()];
+                    UI.with(|ui| {
+                        let mut ui = ui.borrow_mut();
+                        for g in &games {
+                            for c in g.players.iter() {
+                                let key = c.key.to_string();
+                                if c.has_num {
+                                    ui.shown_nums.insert(key.clone(), (c.points_num as f64 - 420.0, c.elo_num as f64 - 14.6));
+                                }
+                                let newest: Vec<String> = c.events.iter().map(|e| e.id.to_string()).filter(|id| !id.is_empty()).take(2).collect();
+                                if let Some(seen) = ui.seen.get_mut(&key) {
+                                    for id in newest {
+                                        seen.remove(&id);
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    refresh(&app, &shared);
+                }
                 advance(step);
                 window.request_redraw();
                 window.draw_if_needed(|rd| {
@@ -1497,6 +1541,7 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                     }),
                     click_at: arg_value(&args, "--click-at").and_then(|v| v.parse().ok()),
                     hover_at: arg_value(&args, "--hover-at").and_then(|v| v.parse().ok()),
+                    board_at: arg_value(&args, "--board-at").and_then(|v| v.parse().ok()),
                 }),
                 scale: arg_value(&args, "--scale").and_then(|v| v.parse().ok()).unwrap_or(1.0),
             },

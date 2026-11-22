@@ -68,8 +68,22 @@ jobs:
           "$hash  x76tracker.exe" | Out-File -Encoding ascii target/release/x76tracker.exe.sha256
           "**x76tracker.exe** SHA-256: ``$hash``" >> $env:GITHUB_STEP_SUMMARY
 
+      # the attestation is recorded in Sigstore's public log, which now and then answers 404 for a
+      # moment ("error fetching tlog entry"): wait and try once more before giving up
       - name: Attest build provenance
+        id: attest
         if: github.event_name != 'pull_request'
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: target/release/x76tracker.exe
+
+      - name: Wait before retrying the attestation
+        if: github.event_name != 'pull_request' && steps.attest.outcome == 'failure'
+        run: Start-Sleep -Seconds 30
+
+      - name: Attest build provenance (retry)
+        if: github.event_name != 'pull_request' && steps.attest.outcome == 'failure'
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: target/release/x76tracker.exe

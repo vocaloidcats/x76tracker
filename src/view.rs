@@ -74,6 +74,9 @@ pub struct UiState {
     pub search_seq: [u64; 2],
     /// The result whose detail panel is open: (card key, row id).
     pub detail: Option<(String, String)>,
+    /// Row ids already on each card's board (new ones fade in) and the points/Elo last shown (they tick).
+    pub seen: HashMap<String, HashSet<String>>,
+    pub shown_nums: HashMap<String, (f64, f64)>,
 }
 
 // ------------------------------------------------------------------ formatting
@@ -522,7 +525,13 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
     let show_elo = metric_is_elo(core, &key);
     let show_all = ui.show_all.contains(&key);
     let chart_data = chart(h, start, show_elo);
-    let (rows, total_rows) = timeline(h, &evs, &mine, start, show_all, core.interval() as f64);
+    let (mut rows, total_rows) = timeline(h, &evs, &mine, start, show_all, core.interval() as f64);
+    // results that weren't on this board last time fade in (nothing does on the first draw)
+    if let Some(seen) = ui.seen.get(&key) {
+        for r in rows.iter_mut() {
+            r.fresh = !r.id.is_empty() && !seen.contains(r.id.as_str());
+        }
+    }
 
     let (pd, pdir) = delta_text(false, d_pts, "P", "no change");
     let (ed, edir) = delta_text(true, d_elo, "", "no change");
@@ -535,7 +544,13 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
     };
     let r = rank.unwrap_or(0);
 
+    let (points_from, elo_from) = ui.shown_nums.get(&key).copied().unwrap_or((points.unwrap_or(0) as f64, elo.unwrap_or(0.0)));
     PlayerCard {
+        has_num: points.is_some() && elo.is_some(),
+        points_num: points.unwrap_or(0) as f32,
+        points_from: points_from as f32,
+        elo_num: elo.unwrap_or(0.0) as f32,
+        elo_from: elo_from as f32,
         game: s(game.id()),
         id: s(fav.id.as_str()),
         key: s(key.as_str()),

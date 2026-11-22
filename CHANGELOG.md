@@ -21,23 +21,24 @@ Each version's section is shown in the app (What's new) and used as its GitHub r
   ![An upset win: a wave washes through its rainbow badge](docs/changelog/2.2.2-upset@2x.png)
 - **Supporter badge:** the same wave washes through it when you point at it.
   ![A wave washing through the supporter badge](docs/changelog/2.2.2-supporter@2x.png)
-- **Panels:** Settings, results, the share card and this menu fade and rise into place, and the Servers tab's bars ease to new player counts.
+- **Motion:** menus drop in, panels and tabs fade and rise into place, new results slide down onto the board, and points, Elo and server player counts tick to their new values. Buttons dim when pressed, and the live dot breathes while x76 is being checked.
+  ![New results sliding onto the board while points and Elo tick up](docs/changelog/2.2.2-motion@2x.png)
 
 ## 2.2.1
 
-![A fight from the game log: the opponent, their tier, rank and Elo, and your chance of winning on paper](docs/images/result-detail-dark.png)
+![A fight from the game log: the opponent, their tier, rank and Elo, and your chance of winning on paper](docs/changelog/2.2.1-fight@2x.png)
 
 ### New
 
 - **R5Reloaded opponents switch:** Settings → General can add the game-log patch to R5Reloaded, or take it out, so anyone can see who they fought, with the opponent's Elo, upsets and best wins. The original game file is kept as a backup, and the patch is put back if a game update replaces it.
-  ![Settings, General: Rich Presence, your players and the R5Reloaded opponents switch](docs/images/settings-general-dark.png)
+  ![Settings, General: Rich Presence, your players and the R5Reloaded opponents switch](docs/changelog/2.2.1-settings@2x.png)
 - **Game folder:** if R5Reloaded isn't in the usual R5R Library folder, you can enter its folder in Settings.
 
 ## 2.2.0
 
 Released together with 2.2.1.
 
-![The Servers tab: players on now, today's peak and a chart for each game, then every server](docs/images/servers-dark.png)
+![The Servers tab: players on now, today's peak and a chart for each game, then every server](docs/changelog/2.2.0-servers@2x.png)
 
 ### New
 
