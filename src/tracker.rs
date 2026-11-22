@@ -1,6 +1,5 @@
 //! Tracker core: downloads the x76 ladders, keeps change history for tracked players and
-//! saves it. `state.json` has exactly the same format as the Python version, so history
-//! carries over between the two.
+//! saves it to `state.json`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -10,7 +9,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const APP_ID: &str = "x76-elo-tracker";
+/// How this app identifies itself to x76 (User-Agent).
+pub const APP_NAME: &str = "x76tracker";
 const API: &str = "https://api.x76.gg/api/";
 pub const INTERVALS: [u64; 4] = [30, 60, 120, 300]; // every copy downloads the full ladder: stay polite
 pub const DEFAULT_INTERVAL: u64 = 60;
@@ -222,16 +222,7 @@ pub fn agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .tls_config(tls)
         .timeout_global(Some(timeout))
-        .user_agent(format!("{APP_ID}/{VERSION}"))
-        .build()
-        .into()
-}
-
-/// Agent for quick checks against this PC: fails fast when nothing is listening.
-pub fn local_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_connect(Some(Duration::from_millis(400)))
-        .timeout_global(Some(Duration::from_secs(5)))
+        .user_agent(format!("{APP_NAME}/{VERSION}"))
         .build()
         .into()
 }
@@ -315,6 +306,13 @@ pub struct Core {
     /// Keys whose history grew in the last check, with the direction of the points change.
     pub fresh: HashMap<String, i32>,
     pub load_warning: Option<String>,
+    /// Your R5Reloaded fights from the game log (needs the optional game mod); kept in fights.json.
+    pub fights: Vec<crate::r5log::Fight>,
+    pub fights_file: PathBuf,
+    /// Linked x76 profile (public data, by handle) and its loading state.
+    pub profile: Option<crate::profile::Profile>,
+    pub profile_busy: bool,
+    pub profile_error: Option<String>,
 }
 
 pub struct Shared {
@@ -328,6 +326,8 @@ pub struct Shared {
 impl Shared {
     pub fn new(data_file: PathBuf) -> Arc<Shared> {
         let (state, load_warning) = load(&data_file);
+        let fights_file = data_file.with_file_name("fights.json");
+        let fights = crate::r5log::load(&fights_file);
         Arc::new(Shared {
             core: Mutex::new(Core {
                 state,
@@ -338,6 +338,11 @@ impl Shared {
                 next_poll: None,
                 fresh: HashMap::new(),
                 load_warning,
+                fights,
+                fights_file,
+                profile: None,
+                profile_busy: false,
+                profile_error: None,
             }),
             wake: Mutex::new(false),
             wake_cv: Condvar::new(),
@@ -436,6 +441,32 @@ impl Shared {
         core.next_poll = Some(now() + core.interval() as f64);
         drop(core);
         notify(true);
+    }
+
+    /// Picks up new fights from R5Reloaded's log. Returns true if there were any.
+    pub fn scan_r5(&self, tail: &mut crate::r5log::Tail) -> bool {
+        let (hint, recent) = {
+            let core = self.lock();
+            let since = now() - 3.0 * 86_400.0; // duplicates can only come from recent sessions
+            let recent: Vec<_> = core.fights.iter().filter(|f| f.t >= since).cloned().collect();
+            (core.setting_str("r5Path"), recent)
+        };
+        let new = crate::r5log::scan(tail, hint.as_deref(), &recent);
+        let mut core = self.lock();
+        if let Some(dir) = tail.game_dir.as_ref().map(|d| d.display().to_string()) {
+            if hint.as_deref() != Some(dir.as_str()) {
+                core.set_setting("r5Path", dir.into()); // remember where the game is
+            }
+        }
+        let added = !new.is_empty();
+        core.fights.extend(new);
+        core.fights.sort_by(|a, b| a.t.total_cmp(&b.t));
+        let rated = core.rate_fights();
+        if added || rated {
+            let file = core.fights_file.clone();
+            crate::r5log::save(&file, &mut core.fights);
+        }
+        added || rated
     }
 
     pub fn add_favorite(&self, game: Game, id: &str) -> Result<(), String> {
@@ -564,6 +595,33 @@ impl Core {
         if changed {
             let _ = self.save();
         }
+    }
+
+    /// Fills in the opponent's (and your) Elo, points, tier and rank for recent fights, from the
+    /// last R5 ladder check. Fights are read within seconds, so that check is from before the fight.
+    fn rate_fights(&mut self) -> bool {
+        let Some(board) = self.boards.get(&Game::R5).cloned() else { return false };
+        let find = |name: &str| -> Option<&Player> {
+            board
+                .by_id
+                .get(name)
+                .and_then(|v| v.first())
+                .map(|&i| &board.players[i])
+                .or_else(|| board.players.iter().find(|p| p.name.eq_ignore_ascii_case(name)))
+        };
+        let cutoff = now() - 1800.0; // older fights would get today's numbers, not the ones at the time
+        let mut changed = false;
+        for f in self.fights.iter_mut().filter(|f| f.opp_elo.is_none() && f.t >= cutoff && !f.opponent.is_empty()) {
+            if let Some(o) = find(&f.opponent) {
+                f.opp_elo = o.elo;
+                f.opp_points = o.points;
+                f.opp_tier = Some(o.tier.clone());
+                f.opp_rank = Some(o.rank);
+                f.my_elo = find(&f.me).and_then(|p| p.elo);
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn remove_favorite(&mut self, game: &str, id: &str) {

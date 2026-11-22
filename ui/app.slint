@@ -1,4 +1,4 @@
-// x76 Elo Tracker (native). Drawn by Slint, styled after the x76.gg design language:
+// x76tracker. Drawn by Slint, styled after the x76.gg design language:
 // paper/ink neutrals, Archivo + IBM Plex Mono, pill controls, tier colours. Data comes from Rust.
 
 import { ScrollView, Palette } from "std-widgets.slint";
@@ -15,7 +15,11 @@ import "fonts/IBMPlexMono-SemiBold.ttf";
 export struct Tick { y: float, label: string }
 export struct ChartPoint { x: float, y: float, value: string, when: string, change: string, dir: int, sub: string }
 export struct ChartData { ticks: [Tick], points: [ChartPoint], lookup: [int], start: string, span: string }
-export struct EventRow { when: string, when-full: string, wins: int, losses: int, note: string, elo: string, elo-dir: int, pts: string, pts-dir: int }
+// tier-key -1 = not rated (opponent not found on the ladder); gap = their Elo minus yours, dir 1 = they were above you
+export struct Opponent { name: string, elo: string, tier-key: int, gap: string, gap-dir: int, won: bool, upset: bool }
+// kind: 0 ladder change (W/L from its counts), 1 fight from the game log, 2 x76 booking Elo/points,
+// 3 predicted next points booking
+export struct EventRow { kind: int, label: string, id: string, when: string, when-full: string, wins: int, losses: int, note: string, opponents: [Opponent], more: string, elo: string, elo-dir: int, pts: string, pts-dir: int }
 export struct PlayerCard {
     game: string, id: string, key: string, name: string, link: bool,
     rank: string, top: int, tier: string, tier-key: int, moved: string, moved-dir: int, missing: bool,
@@ -30,6 +34,24 @@ export struct PlayerCard {
 }
 export struct SearchResult { id: string, rank: string, name: string, tier: string, tier-key: int, points: string, alias: string, tracked: bool }
 export struct GameData { id: string, label: string, mode: string, placeholder: string, players: [PlayerCard] }
+// detail panel for one result row
+export struct StatChange { label: string, before: string, after: string, change: string, dir: int }
+export struct FightDetail {
+    when: string, won: bool, opponent: string, tier: string, tier-key: int, rank: string,
+    elo: string, points: string, gap: string, gap-dir: int, chance: string, upset: bool,
+    now: string, rated: bool, can-track: bool,
+}
+export struct EventDetail {
+    open: bool, key: string, game: string, title: string, subtitle: string,
+    stats: [StatChange], record: string, tier-from: string, tier-to: string, tier-key: int,
+    fights: [FightDetail], hint: string,
+}
+export struct GameRank { label: string, has: bool, name: string, rank: string, tier: string, tier-key: int, points: string, elo: string }
+export struct ProfileCard {
+    linked: bool, busy: bool, error: string,
+    name: string, handle: string, initial: string, badges: [string], supporter: bool, verified: bool,
+    has-avatar: bool, has-banner: bool, ql: GameRank, r5: GameRank,
+}
 
 // ---------------------------------------------------------------- actions (handled in Rust)
 export global Actions {
@@ -47,6 +69,11 @@ export global Actions {
     callback show-all(key: string);
     callback open-profile(id: string);
     callback dismiss-banner();
+    callback open-event(key: string, id: string);
+    callback close-event();
+    callback profile-link(handle: string);
+    callback profile-unlink();
+    callback open-x76();
 }
 
 // Implemented in Rust: turns normalised chart points into a step-line path at a given pixel size.
@@ -110,6 +137,7 @@ component Delta inherits HorizontalLayout {
     in property <int> dir;
     in property <length> size: 12px;
     in property <bool> mono: false;
+    in property <bool> neutral: false;
     spacing: 3px;
     if root.dir != 0: VerticalLayout {
         alignment: center;
@@ -119,7 +147,7 @@ component Delta inherits HorizontalLayout {
             viewbox-width: 10;
             viewbox-height: 9;
             commands: root.dir > 0 ? "M 5 0 L 10 9 L 0 9 Z" : "M 0 0 L 10 0 L 5 9 Z";
-            fill: Theme.dir-color(root.dir);
+            fill: root.neutral ? Theme.fg-muted : Theme.dir-color(root.dir);
         }
     }
     Text {
@@ -127,7 +155,7 @@ component Delta inherits HorizontalLayout {
         font-family: root.mono ? Theme.mono : "Archivo";
         font-size: root.size;
         font-weight: 500;
-        color: Theme.dir-color(root.dir);
+        color: root.neutral ? Theme.fg-muted : Theme.dir-color(root.dir);
         vertical-alignment: center;
     }
 }
@@ -224,13 +252,30 @@ component RoundButton inherits Rectangle {
     }
 }
 
+// x76's rank emblems by tier-key (0 nab … 7 light), downloaded from x76.gg at runtime
+export global RankIcons {
+    in property <[image]> icons;
+    in property <bool> ready;
+}
+
+// Tier marker: x76's emblem when loaded, otherwise a diamond in the tier colour
 component Gem inherits Rectangle {
     in property <int> tier-key;
-    width: 22px;
-    height: 22px;
-    Path {
-        width: 12px;
-        height: 12px;
+    in property <length> size: 22px;
+    property <bool> art: RankIcons.ready && root.tier-key >= 0 && root.tier-key < RankIcons.icons.length;
+    width: root.size;
+    height: root.size;
+    if root.art: Image {
+        width: root.size;
+        height: root.size;
+        source: RankIcons.icons[root.tier-key];
+        image-fit: contain;
+    }
+    if !root.art: Path {
+        x: (root.size - self.width) / 2;
+        y: (root.size - self.height) / 2;
+        width: root.size * 0.55;
+        height: root.size * 0.55;
         viewbox-width: 12;
         viewbox-height: 12;
         commands: "M 6 0 L 12 6 L 6 12 L 0 6 Z";
@@ -478,7 +523,7 @@ component PlayerCardView inherits Rectangle {
                 font-weight: root.p.top > 0 ? 600 : 500;
                 color: root.p.top == 1 ? Theme.tier-color(3) : root.p.top == 2 ? Theme.tier-color(2) : root.p.top == 3 ? Theme.tier-color(1) : Theme.fg-muted;
             }
-            VerticalLayout { alignment: center; horizontal-stretch: 0; Gem { tier-key: root.p.tier-key; } }
+            VerticalLayout { alignment: center; horizontal-stretch: 0; Gem { tier-key: root.p.tier-key; size: 30px; } }
             VerticalLayout {
                 alignment: center;
                 spacing: 1px;
@@ -665,8 +710,15 @@ component PlayerCardView inherits Rectangle {
             }
             for e in root.p.events: Rectangle {
                 height: 33px;
-                background: Theme.surface;
+                background: e.kind == 3 ? transparent : row-ta.has-hover && e.id != "" ? Theme.surface.mix(Theme.fg, 0.93) : Theme.surface;
                 border-radius: 8px;
+                border-width: e.kind == 3 ? 1px : 0px;
+                border-color: Theme.line-2;
+                // click a result for the full breakdown
+                row-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { if (e.id != "") { Actions.open-event(root.p.key, e.id); } }
+                }
                 HorizontalLayout {
                     padding-left: 10px;
                     padding-right: 10px;
@@ -679,6 +731,30 @@ component PlayerCardView inherits Rectangle {
                         if e.wins > 0: VerticalLayout { alignment: center; Chip { text: e.wins > 1 ? "\{e.wins}W" : "W"; kind: 1; } }
                         if e.losses > 0: VerticalLayout { alignment: center; Chip { text: e.losses > 1 ? "\{e.losses}L" : "L"; kind: -1; } }
                         if e.note != "": VerticalLayout { alignment: center; Chip { text: e.note; kind: 0; } }
+                        if e.label != "": Mono { text: e.label; font-size: 11.5px; color: e.kind == 3 ? Theme.accent-fg : Theme.fg-muted; overflow: elide; min-width: 0px; }
+                        for o in e.opponents: HorizontalLayout {
+                            spacing: 4px;
+                            min-width: 0px;
+                            horizontal-stretch: 1;
+                            if o.tier-key >= 0: VerticalLayout { alignment: center; Gem { tier-key: o.tier-key; size: 18px; } }
+                            Text { text: o.name; font-size: 12.5px; font-weight: 600; color: Theme.fg; overflow: elide; min-width: 0px; vertical-alignment: center; }
+                            if o.elo != "": Mono { text: o.elo; font-size: 11.5px; color: Theme.fg-muted; }
+                            if o.gap-dir != 0: Delta { text: o.gap; dir: o.gap-dir; size: 10.5px; mono: true; neutral: true; }
+                            // an upset you won is a good thing (rainbow); one you lost is not (red)
+                            if o.upset: VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    border-radius: self.height / 2;
+                                    background: o.won ? @linear-gradient(115deg, #6fe3ff 0%, #9d7bff 35%, #f07ae0 65%, #c6f07a 100%) : Theme.danger;
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        Mono { text: "upset"; font-size: 10px; font-weight: 600; color: o.won ? #17161a : #ffffff; height: 15px; }
+                                    }
+                                }
+                            }
+                        }
+                        if e.more != "": Mono { text: e.more; font-size: 11.5px; }
                     }
                     Delta { width: 76px; alignment: end; text: e.elo; dir: e.elo-dir; mono: true; }
                     Delta { width: 76px; alignment: end; text: e.pts; dir: e.pts-dir; mono: true; }
@@ -829,6 +905,7 @@ component GameColumn inherits Rectangle {
                         HorizontalLayout {
                             alignment: start;
                             spacing: 6px;
+                            VerticalLayout { alignment: center; Gem { tier-key: r.tier-key; size: 16px; } }
                             Mono { text: r.tier; color: Theme.tier-color(r.tier-key); }
                             Mono { text: "· " + r.points + "P"; }
                             if r.alias != "": Mono { text: "· " + r.alias; overflow: elide; }
@@ -849,6 +926,399 @@ component GameColumn inherits Rectangle {
             if root.search-msg != "": HorizontalLayout {
                 padding: 10px;
                 Text { text: root.search-msg; font-size: 13.5px; color: Theme.fg-muted; wrap: word-wrap; }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- x76 profile card
+component Pill inherits Rectangle {
+    in property <string> text;
+    in property <bool> on-image;
+    in property <bool> shiny;
+    border-radius: self.height / 2;
+    background: root.shiny ? @linear-gradient(115deg, #6fe3ff 0%, #9d7bff 35%, #f07ae0 65%, #c6f07a 100%)
+        : root.on-image ? #ffffff2e : Theme.surface;
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        padding-top: 2px;
+        padding-bottom: 2px;
+        Mono {
+            text: root.text;
+            font-size: 10.5px;
+            font-weight: root.shiny ? 600 : 500;
+            color: root.shiny ? #17161a : root.on-image ? #ffffff : Theme.fg-muted;
+        }
+    }
+}
+
+component RankTile inherits Rectangle {
+    in property <GameRank> r;
+    in property <bool> on-image;
+    property <color> ink: root.on-image ? #ffffff : Theme.fg;
+    property <color> soft: root.on-image ? #ffffffb3 : Theme.fg-muted;
+    background: root.on-image ? #0000008c : Theme.surface;
+    border-radius: 12px;
+    min-width: 176px;
+    VerticalLayout {
+        padding: 12px;
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 4px;
+        Eyebrow { text: root.r.label; color: root.soft; }
+        if root.r.has: HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+            VerticalLayout { alignment: center; Gem { tier-key: root.r.tier-key; size: 30px; } }
+            Text { text: root.r.tier; font-size: 15px; font-weight: 600; color: root.ink; vertical-alignment: center; }
+            Mono { text: root.r.rank; font-size: 12px; color: root.soft; }
+        }
+        if root.r.has: HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            Text { text: root.r.points + "P"; font-size: 13px; font-weight: 600; color: root.ink; }
+            Mono { text: root.r.elo + " elo"; font-size: 11.5px; color: root.soft; }
+        }
+        if !root.r.has: Text {
+            text: root.r.name == "" ? "no account linked" : "not on the ladder";
+            font-size: 13px;
+            color: root.soft;
+        }
+    }
+}
+
+component ProfileCardView inherits Rectangle {
+    in property <ProfileCard> p;
+    in property <image> avatar;
+    in property <image> banner;
+    property <bool> img: root.p.has-banner;
+    height: 168px;
+    border-radius: 16px;
+    clip: true;
+    background: Theme.surface-2;
+    if root.img: Image {
+        width: root.width;
+        height: root.height;
+        source: root.banner;
+        image-fit: cover;
+    }
+    // darken the banner behind the text so it stays readable
+    if root.img: Rectangle {
+        background: @linear-gradient(90deg, #000000d9 0%, #000000a6 45%, #00000040 100%);
+    }
+    HorizontalLayout {
+        padding: 22px;
+        spacing: 18px;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+            Rectangle {
+                width: 88px;
+                height: 88px;
+                border-radius: 44px;
+                background: root.img ? #ffffff38 : Theme.surface;
+                if root.p.has-avatar: Image {
+                    x: 4px;
+                    y: 4px;
+                    width: 80px;
+                    height: 80px;
+                    source: root.avatar;
+                    image-fit: cover;
+                }
+                if !root.p.has-avatar: Text {
+                    text: root.p.initial;
+                    font-size: 34px;
+                    font-weight: 600;
+                    color: root.img ? #ffffff : Theme.fg-muted;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 5px;
+            horizontal-stretch: 1;
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text {
+                    text: root.p.name;
+                    font-size: 26px;
+                    font-weight: 600;
+                    letter-spacing: -0.52px;
+                    color: root.img ? #ffffff : Theme.fg;
+                    overflow: elide;
+                    min-width: 0px;
+                }
+                if root.p.verified: VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 18px;
+                        height: 18px;
+                        border-radius: 9px;
+                        background: Theme.accent-fg;
+                        Path {
+                            width: 10px;
+                            height: 10px;
+                            viewbox-width: 12;
+                            viewbox-height: 12;
+                            commands: "M 2 6.5 L 5 9 L 10 3";
+                            stroke: #ffffff;
+                            stroke-width: 1.8px;
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+                Mono {
+                    text: "@" + root.p.handle;
+                    font-size: 12px;
+                    color: root.img ? #ffffffb3 : Theme.fg-muted;
+                    handle-ta := TouchArea { mouse-cursor: pointer; clicked => { Actions.open-x76(); } }
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+                padding-top: 2px;
+                if root.p.supporter: Pill { text: "supporter"; shiny: true; }
+                for b in root.p.badges: Pill { text: b; on-image: root.img; }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+            HorizontalLayout {
+                spacing: 10px;
+                RankTile { r: root.p.ql; on-image: root.img; }
+                RankTile { r: root.p.r5; on-image: root.img; }
+            }
+        }
+    }
+    // unlink, top right
+    Rectangle {
+        x: root.width - 26px - 12px;
+        y: 12px;
+        width: 26px;
+        height: 26px;
+        RoundButton {
+            icon: "M 2.5 2.5 L 9.5 9.5 M 9.5 2.5 L 2.5 9.5";
+            clicked => { Actions.profile-unlink(); }
+        }
+    }
+}
+
+// "Link your x76 profile" prompt shown until a profile is linked
+component LinkProfileRow inherits HorizontalLayout {
+    in property <bool> busy;
+    in property <string> error;
+    property <bool> open;
+    alignment: start;
+    spacing: 10px;
+    if !root.open && !root.busy: Mono {
+        text: "x76 member? link your profile to show your card";
+        font-size: 12px;
+        color: link-ta.has-hover ? Theme.fg : Theme.accent-fg;
+        link-ta := TouchArea { mouse-cursor: pointer; clicked => { root.open = true; } }
+    }
+    if root.open || root.busy: HorizontalLayout {
+        spacing: 10px;
+        alignment: start;
+        Rectangle {
+            width: 260px;
+            height: 38px;
+            border-radius: 8px;
+            background: Theme.surface-2;
+            border-width: 1px;
+            border-color: handle-input.has-focus ? Theme.line-2 : transparent;
+            handle-input := TextInput {
+                x: 12px;
+                width: parent.width - 24px;
+                font-size: 13.5px;
+                color: Theme.fg;
+                single-line: true;
+                vertical-alignment: center;
+                accepted => { Actions.profile-link(self.text); }
+            }
+            if handle-input.text == "": Text {
+                x: 12px;
+                width: parent.width - 24px;
+                height: parent.height;
+                text: "your x76 handle";
+                font-size: 13.5px;
+                color: Theme.fg-faint;
+                vertical-alignment: center;
+            }
+        }
+        VerticalLayout { alignment: center; Button { text: root.busy ? "Linking…" : "Link"; enabled: !root.busy; clicked => { Actions.profile-link(handle-input.text); } } }
+        VerticalLayout { alignment: center; Button { text: "Cancel"; kind: 1; clicked => { root.open = false; } } }
+    }
+    if root.error != "": Text { text: root.error; font-size: 13px; color: Theme.danger; vertical-alignment: center; }
+}
+
+// ---------------------------------------------------------------- result detail panel
+component StatTile inherits Rectangle {
+    in property <StatChange> c;
+    background: Theme.surface;
+    border-radius: 10px;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 4px;
+        Eyebrow { text: root.c.label; font-size: 10.5px; }
+        HorizontalLayout { alignment: start; Delta { text: root.c.change; dir: root.c.dir; size: 15px; } }
+        Mono { text: root.c.before + "  →  " + root.c.after; font-size: 11px; overflow: elide; }
+    }
+}
+
+component FightCard inherits Rectangle {
+    in property <FightDetail> f;
+    in property <string> game;
+    background: Theme.surface;
+    border-radius: 10px;
+    HorizontalLayout {
+        padding: 12px;
+        padding-left: 14px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            spacing: 5px;
+            horizontal-stretch: 0;
+            HorizontalLayout { alignment: start; Chip { text: root.f.won ? "WIN" : "LOSS"; kind: root.f.won ? 1 : -1; } }
+            Mono { text: root.f.when; font-size: 11px; }
+        }
+        VerticalLayout { alignment: center; horizontal-stretch: 0; Gem { tier-key: root.f.tier-key; size: 36px; } }
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+            horizontal-stretch: 1;
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text { text: root.f.opponent; font-size: 15px; font-weight: 600; color: Theme.fg; overflow: elide; min-width: 0px; }
+                if root.f.upset: VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        border-radius: self.height / 2;
+                        background: root.f.won ? @linear-gradient(115deg, #6fe3ff 0%, #9d7bff 35%, #f07ae0 65%, #c6f07a 100%) : Theme.danger;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            Mono { text: "upset"; font-size: 10.5px; font-weight: 600; color: root.f.won ? #17161a : #ffffff; height: 17px; }
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                if root.f.tier != "": Mono { text: root.f.tier; font-weight: 600; color: Theme.tier-color(root.f.tier-key); }
+                if root.f.rank != "": Mono { text: root.f.rank; }
+                if root.f.points != "": Mono { text: root.f.points; }
+            }
+            if root.f.now != "": Mono { text: root.f.now; font-size: 10.5px; color: Theme.fg-faint; overflow: elide; }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+            horizontal-stretch: 0;
+            if root.f.rated: HorizontalLayout {
+                alignment: end;
+                spacing: 4px;
+                Text { text: root.f.elo; font-size: 17px; font-weight: 600; letter-spacing: -0.3px; color: Theme.fg; }
+                VerticalLayout { alignment: end; padding-bottom: 2px; Mono { text: "elo"; } }
+            }
+            if root.f.rated: HorizontalLayout {
+                alignment: end;
+                spacing: 5px;
+                if root.f.gap-dir != 0: Delta { text: root.f.gap; dir: root.f.gap-dir; size: 11px; mono: true; neutral: true; }
+                Mono { text: root.f.gap-dir > 0 ? "above you" : root.f.gap-dir < 0 ? "below you" : "same as you"; }
+            }
+            if root.f.chance != "": Mono { text: root.f.chance; horizontal-alignment: right; }
+            if !root.f.rated: Mono { text: "not rated"; horizontal-alignment: right; }
+        }
+        if root.f.can-track: VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+            Button { text: "Track"; kind: 1; clicked => { Actions.track(root.game, root.f.opponent); } }
+        }
+    }
+}
+
+component EventPanel inherits Rectangle {
+    in property <EventDetail> d;
+    background: #000000a6;
+    // a click outside the panel closes it
+    TouchArea { clicked => { Actions.close-event(); } }
+    panel := Rectangle {
+        width: min(700px, root.width - 48px);
+        height: min(root.height - 64px, body.preferred-height + 2px);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        background: Theme.canvas;
+        border-radius: 16px;
+        border-width: 1px;
+        border-color: Theme.line-2;
+        clip: true;
+        TouchArea { } // clicks inside stay inside
+        inner := ScrollView {
+            content-width: self.visible-width;
+            content-height: body.preferred-height;
+            body := VerticalLayout {
+                width: inner.visible-width;
+                padding: 22px;
+                spacing: 16px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout {
+                        spacing: 4px;
+                        horizontal-stretch: 1;
+                        Eyebrow { text: "RESULT"; }
+                        Text { text: root.d.title; font-size: 22px; font-weight: 600; letter-spacing: -0.4px; color: Theme.fg; }
+                        Mono { text: root.d.subtitle; font-size: 11.5px; wrap: word-wrap; }
+                    }
+                    VerticalLayout {
+                        alignment: start;
+                        horizontal-stretch: 0;
+                        RoundButton { icon: "M 2.5 2.5 L 9.5 9.5 M 9.5 2.5 L 2.5 9.5"; clicked => { Actions.close-event(); } }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Rectangle {
+                        border-radius: self.height / 2;
+                        background: Theme.surface-2;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            padding-top: 3px;
+                            padding-bottom: 3px;
+                            Text { text: root.d.record; font-size: 13px; font-weight: 600; color: Theme.fg; }
+                        }
+                    }
+                    if root.d.tier-from != root.d.tier-to && root.d.tier-to != "": Rectangle {
+                        border-radius: self.height / 2;
+                        background: Theme.surface-2;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 10px;
+                            spacing: 6px;
+                            VerticalLayout { alignment: center; Gem { tier-key: root.d.tier-key; size: 20px; } }
+                            Text { text: root.d.tier-from + "  →  " + root.d.tier-to; font-size: 13px; font-weight: 600; color: Theme.fg; vertical-alignment: center; }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    for c in root.d.stats: StatTile { c: c; horizontal-stretch: 1; }
+                }
+                if root.d.fights.length > 0: Eyebrow { text: "FIGHTS FROM THE GAME LOG"; }
+                for f in root.d.fights: FightCard { f: f; game: root.d.game; }
+                Text { text: root.d.hint; font-size: 12px; color: Theme.fg-faint; wrap: word-wrap; }
             }
         }
     }
@@ -916,7 +1386,11 @@ export component AppWindow inherits Window {
     in property <int> period;
     in property <string> data-file;
     in property <string> version;
-    in property <string> banner;
+    in property <string> banner-text;
+    in property <ProfileCard> profile;
+    in property <image> avatar;
+    in property <image> banner;
+    in property <EventDetail> detail;
     property <string> period-word: period == 0 ? "today" : period == 1 ? "last 24h" : "since tracking";
     property <bool> wide: sv.visible-width >= 1100px;
     // side margins (x76's 1376px container) and the width of each game column when side by side
@@ -928,7 +1402,7 @@ export component AppWindow inherits Window {
         Palette.color-scheme = d ? ColorScheme.dark : ColorScheme.light;
     }
 
-    title: "Elo Tracker for x76";
+    title: "x76tracker";
     icon: @image-url("icon.png");
     no-frame: true;
     preferred-width: 1440px;
@@ -968,7 +1442,7 @@ export component AppWindow inherits Window {
                         stroke-width: 2.4px;
                     }
                 }
-                Text { horizontal-stretch: 0; text: "Elo Tracker"; font-size: 17px; font-weight: 600; letter-spacing: -0.34px; color: Theme.fg; vertical-alignment: center; }
+                Text { horizontal-stretch: 0; text: "x76tracker"; font-size: 17px; font-weight: 600; letter-spacing: -0.34px; color: Theme.fg; vertical-alignment: center; }
                 VerticalLayout {
                     alignment: center;
                     horizontal-stretch: 0;
@@ -1171,7 +1645,17 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        if root.banner != "": VerticalLayout {
+                        // x76 profile: the card when linked, otherwise a small prompt
+                        if root.profile.linked: VerticalLayout {
+                            padding-top: 28px;
+                            ProfileCardView { p: root.profile; avatar: root.avatar; banner: root.banner; }
+                        }
+                        if !root.profile.linked: VerticalLayout {
+                            padding-top: 20px;
+                            LinkProfileRow { busy: root.profile.busy; error: root.profile.error; }
+                        }
+
+                        if root.banner-text != "": VerticalLayout {
                             padding-top: 24px;
                             Rectangle {
                                 background: Theme.danger-soft;
@@ -1180,7 +1664,7 @@ export component AppWindow inherits Window {
                                     padding: 10px;
                                     padding-left: 16px;
                                     spacing: 10px;
-                                    Text { text: root.banner; font-size: 14px; color: Theme.danger; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; }
+                                    Text { text: root.banner-text; font-size: 14px; color: Theme.danger; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; }
                                     VerticalLayout {
                                         alignment: center;
                                         horizontal-stretch: 0;
@@ -1236,6 +1720,14 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
+
+    // ------------------------------------------------ result detail panel (over the page, under the title bar edges)
+    if root.detail.open: EventPanel {
+        y: 64px;
+        width: root.width;
+        height: root.height - 64px;
+        d: root.detail;
     }
 
     // ------------------------------------------------ resize handles along the edges (off while maximized)

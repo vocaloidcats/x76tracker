@@ -5,8 +5,8 @@
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/icon.ico")
-            .set("FileDescription", "x76 Elo Tracker (unofficial)")
-            .set("ProductName", "x76 Elo Tracker")
+            .set("FileDescription", "x76tracker (unofficial)")
+            .set("ProductName", "x76tracker")
             .set("LegalCopyright", "MIT License");
         if let Err(e) = res.compile() {
             println!("cargo:warning=could not embed the app icon: {e}");

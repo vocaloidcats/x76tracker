@@ -1,14 +1,17 @@
-﻿//! x76 Elo Tracker, native edition. A window drawn with Slint; a background thread checks the
+﻿//! x76tracker. A window drawn with Slint; a background thread checks the
 //! x76 ladders and records every change for the players you track.
 //!
-//!   x76EloTracker.exe                         normal start
-//!   x76EloTracker.exe --data-dir D:\x76       keep history somewhere else
-//!   x76EloTracker.exe --screenshot out.png [--size 1440x1000] [--light|--dark] [--hover x,y] [--offline]
+//!   x76tracker.exe                            normal start
+//!   x76tracker.exe --data-dir D:\x76          keep history somewhere else
+//!   x76tracker.exe --screenshot out.png [--size 1440x1000] [--light|--dark] [--hover x,y] [--offline]
 //!                                             render the window to a PNG without showing it
 #![windows_subsystem = "windows"]
 
 slint::include_modules!();
 
+mod profile;
+mod r5log;
+mod ranks;
 mod tracker;
 mod view;
 
@@ -19,12 +22,94 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tracker::{now, Game, Hit, Shared, APP_ID, INTERVALS, VERSION};
+use tracker::{now, Game, Hit, Shared, INTERVALS, VERSION};
 use view::{Period, UiState};
 
 thread_local! {
     // UI-thread-only state (expanded lists, pending remove, search box state)
     static UI: RefCell<UiState> = RefCell::new(UiState::default());
+    // whether profile pictures are loaded: (avatar, banner)
+    static PICS: RefCell<(bool, bool)> = const { RefCell::new((false, false)) };
+}
+
+type Pixels = Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>>;
+
+/// Fetches the public x76 profile and its pictures (blocking; call off the UI thread).
+fn fetch_profile(shared: &Shared, handle: &str) -> Result<(Pixels, Pixels), String> {
+    let p = profile::fetch(handle)?;
+    // both ladders, for the rank tiles (cached copies are reused if they're under 5 minutes old)
+    if p.steam_id.is_some() {
+        let _ = shared.board(Game::Ql, 300.0);
+    }
+    let _ = shared.board(Game::R5, 300.0);
+    let avatar = p.avatar_url.as_deref().and_then(|u| profile::picture(u, 256, true));
+    let banner = p.banner_url.as_deref().and_then(|u| profile::picture(u, 1600, false));
+    let mut core = shared.lock();
+    core.set_setting("x76Handle", p.handle.clone().into());
+    core.profile = Some(p);
+    core.profile_error = None;
+    Ok((avatar, banner))
+}
+
+/// Hands x76's rank emblems to the UI (missing ones fall back to the drawn diamond).
+fn show_rank_icons(app: &AppWindow, icons: Vec<Pixels>) {
+    if icons.iter().all(Option::is_none) {
+        return;
+    }
+    let images: Vec<slint::Image> = icons.into_iter().map(|px| px.map(slint::Image::from_rgba8).unwrap_or_default()).collect();
+    let g = app.global::<RankIcons>();
+    g.set_icons(slint::ModelRc::new(slint::VecModel::from(images)));
+    g.set_ready(true);
+}
+
+/// Loads the rank emblems in the background (cache first, x76.gg if missing).
+fn load_rank_icons(app: &AppWindow, shared: &Shared) {
+    let cache = shared.lock().data_file.with_file_name("ranks");
+    let weak = app.as_weak();
+    std::thread::spawn(move || {
+        let icons = ranks::load(&cache);
+        let _ = weak.upgrade_in_event_loop(move |app| show_rank_icons(&app, icons));
+    });
+}
+
+fn show_pictures(app: &AppWindow, avatar: Pixels, banner: Pixels) {
+    PICS.with(|p| *p.borrow_mut() = (avatar.is_some(), banner.is_some()));
+    if let Some(a) = avatar {
+        app.set_avatar(slint::Image::from_rgba8(a));
+    }
+    if let Some(b) = banner {
+        app.set_banner(slint::Image::from_rgba8(b));
+    }
+}
+
+fn link_profile(app: &AppWindow, shared: &Arc<Shared>, handle: String) {
+    let handle = profile::clean_handle(&handle);
+    if handle.is_empty() {
+        return;
+    }
+    {
+        let mut core = shared.lock();
+        core.profile_busy = true;
+        core.profile_error = None;
+    }
+    refresh(app, shared);
+    let (weak, shared) = (app.as_weak(), shared.clone());
+    std::thread::spawn(move || {
+        let result = fetch_profile(&shared, &handle);
+        let _ = weak.upgrade_in_event_loop(move |app| {
+            {
+                let mut core = shared.lock();
+                core.profile_busy = false;
+                if let Err(e) = &result {
+                    core.profile_error = Some(e.clone());
+                }
+            }
+            if let Ok((avatar, banner)) = result {
+                show_pictures(&app, avatar, banner);
+            }
+            refresh(&app, &shared);
+        });
+    });
 }
 
 const SEARCH_SHOWN: usize = 8;
@@ -53,6 +138,10 @@ fn refresh(app: &AppWindow, shared: &Shared) {
         app.set_r5(view::game_data(&core, Game::R5, period, &ui));
         ui.flash.clear();
     });
+    let (has_avatar, has_banner) = PICS.with(|p| *p.borrow());
+    app.set_profile(view::profile_card(&core, has_avatar, has_banner));
+    let open_detail = UI.with(|ui| ui.borrow().detail.clone());
+    app.set_detail(open_detail.and_then(|(key, id)| view::event_detail(&core, &key, &id)).unwrap_or_default());
     app.set_period(period.index());
     app.set_interval_idx(INTERVALS.iter().position(|&i| i == core.interval()).unwrap_or(1) as i32);
     drop(core);
@@ -205,7 +294,7 @@ fn wire(app: &AppWindow, shared: &Arc<Shared>) {
                 }
                 let _ = w.upgrade_in_event_loop(move |app| {
                     if let Err(e) = result {
-                        app.set_banner(format!("Couldn't track that player: {e}").into());
+                        app.set_banner_text(format!("Couldn't track that player: {e}").into());
                     }
                     refresh(&app, &s);
                     rerun_search(&app, &s, g);
@@ -288,11 +377,61 @@ fn wire(app: &AppWindow, shared: &Arc<Shared>) {
             let _ = std::process::Command::new("explorer").arg(format!("https://steamcommunity.com/profiles/{id}")).spawn();
         }
     });
+    actions.on_open_event({
+        let (w, s) = ctx!();
+        move |key, id| {
+            UI.with(|ui| ui.borrow_mut().detail = Some((key.to_string(), id.to_string())));
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_close_event({
+        let (w, s) = ctx!();
+        move || {
+            UI.with(|ui| ui.borrow_mut().detail = None);
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_profile_link({
+        let (w, s) = ctx!();
+        move |handle| {
+            if let Some(app) = w.upgrade() {
+                link_profile(&app, &s, handle.to_string());
+            }
+        }
+    });
+    actions.on_profile_unlink({
+        let (w, s) = ctx!();
+        move || {
+            {
+                let mut core = s.lock();
+                core.state.settings.remove("x76Handle");
+                let _ = core.save();
+                core.profile = None;
+                core.profile_error = None;
+            }
+            PICS.with(|p| *p.borrow_mut() = (false, false));
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_open_x76({
+        let (_, s) = ctx!();
+        move || {
+            if let Some(h) = s.lock().profile.as_ref().map(|p| p.handle.clone()) {
+                let _ = std::process::Command::new("explorer").arg(format!("https://x76.gg/u/?h={h}")).spawn();
+            }
+        }
+    });
     actions.on_dismiss_banner({
         let (w, _) = ctx!();
         move || {
             if let Some(app) = w.upgrade() {
-                app.set_banner("".into());
+                app.set_banner_text("".into());
             }
         }
     });
@@ -366,54 +505,37 @@ fn startup(app: &AppWindow, shared: &Shared) {
         app.invoke_set_dark(theme == "dark");
     }
     if let Some(w) = &core.load_warning {
-        app.set_banner(w.as_str().into());
+        app.set_banner_text(w.as_str().into());
     }
 }
 
 // ------------------------------------------------------------------ guards
 fn default_data_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
+    let local = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join("AppData").join("Local")))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("x76EloTracker")
+        .unwrap_or_else(|| PathBuf::from("."));
+    let dir = local.join("x76tracker");
+    // version 2.0.0 kept history in "x76EloTracker": copy it over on the first start (the old
+    // folder is left as it is)
+    let old = local.join("x76EloTracker");
+    if !dir.exists() && old.join("state.json").is_file() {
+        let _ = copy_dir(&old, &dir);
+    }
+    dir
 }
 
-fn same_path(a: &str, b: &Path) -> bool {
-    let norm = |s: &str| s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
-    norm(a) == norm(&b.display().to_string())
-}
-
-/// Is the browser (Python) version answering on `port` and saving to the same history file?
-fn browser_version_at(port: u16, data_file: &Path) -> bool {
-    let agent = tracker::local_agent();
-    let base = format!("http://127.0.0.1:{port}");
-    let is_tracker = agent
-        .get(format!("{base}/api/ping"))
-        .call()
-        .ok()
-        .and_then(|mut r| r.body_mut().read_json::<Value>().ok())
-        .is_some_and(|v| v.get("app").and_then(Value::as_str) == Some(APP_ID));
-    is_tracker
-        && agent
-            .get(format!("{base}/api/state"))
-            .call()
-            .ok()
-            .and_then(|mut r| r.body_mut().with_config().limit(256 * 1024 * 1024).read_json::<Value>().ok())
-            .and_then(|v| v.pointer("/app/dataFile").and_then(Value::as_str).map(|p| same_path(p, data_file)))
-            .unwrap_or(false)
-}
-
-/// Port of the browser version if it's running on the same history file. All the ports it may
-/// use are probed at once: on Windows a refused local connection can take about a second.
-fn browser_version_on(data_file: &Path) -> Option<u16> {
-    let probes: Vec<_> = (7676..7686)
-        .map(|port| {
-            let file = data_file.to_path_buf();
-            std::thread::spawn(move || browser_version_at(port, &file).then_some(port))
-        })
-        .collect();
-    probes.into_iter().filter_map(|p| p.join().ok().flatten()).min()
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)?.flatten() {
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        if src.is_dir() {
+            copy_dir(&src, &dst)?;
+        } else if entry.file_name() != "app.lock" {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
 }
 
 enum Lock {
@@ -443,7 +565,7 @@ mod win {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::{null, null_mut};
 
-    pub const TITLE: &str = "Elo Tracker for x76";
+    pub const TITLE: &str = "x76tracker";
 
     #[link(name = "user32")]
     extern "system" {
@@ -502,6 +624,8 @@ mod screenshot {
         pub theme: Option<bool>,
         pub hover: Option<(f32, f32)>,
         pub offline: bool,
+        /// open the detail panel on the newest R5 result that has fights in it
+        pub detail: bool,
     }
 
     pub fn run(data_file: PathBuf, o: Options) -> Result<(), Box<dyn std::error::Error>> {
@@ -511,10 +635,30 @@ mod screenshot {
         if !o.offline {
             shared.poll_once(&|_| {});
         }
+        shared.scan_r5(&mut r5log::Tail::default());
+        let saved_handle = shared.lock().setting_str("x76Handle");
+        let pics = saved_handle.and_then(|h| fetch_profile(&shared, &h).ok());
         let app = AppWindow::new()?;
         wire(&app, &shared);
         startup(&app, &shared);
         app.invoke_set_dark(o.theme.unwrap_or(true));
+        if o.detail {
+            let core = shared.lock();
+            if let Some(f) = core.state.favorites.iter().find(|f| f.game == "r5") {
+                let key = tracker::key_of("r5", &f.id);
+                if let Some(h) = core.state.history.get(&key) {
+                    let has_fights = |i: usize| core.fights.iter().any(|x| x.t > h[i - 1].t && x.t <= h[i].t);
+                    if let Some(i) = (1..h.len()).rev().find(|&i| has_fights(i)) {
+                        UI.with(|ui| ui.borrow_mut().detail = Some((key.clone(), view::row_id(h[i].t))));
+                    }
+                }
+            }
+        }
+        if let Some((avatar, banner)) = pics {
+            show_pictures(&app, avatar, banner);
+        }
+        let cache = shared.lock().data_file.with_file_name("ranks");
+        show_rank_icons(&app, ranks::load(&cache));
         refresh(&app, &shared);
         let (w, h) = o.size;
         window.set_size(slint::PhysicalSize::new(w, h));
@@ -570,11 +714,12 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 theme,
                 hover: arg_value(&args, "--hover").and_then(|v| pair(&v, ',')),
                 offline: args.iter().any(|a| a == "--offline"),
+                detail: args.iter().any(|a| a == "--detail"),
             },
         );
     }
 
-    // single-copy check first: it's instant, so a second launch hands off right away
+    // one copy per history folder: a second launch hands off to the first right away
     let _lock = match single_instance(&data_dir) {
         Lock::Busy => {
             win::focus_existing();
@@ -582,13 +727,6 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         }
         lock => lock,
     };
-    if let Some(port) = browser_version_on(&data_file) {
-        win::message(&format!(
-            "The browser version of Elo Tracker is running (port {port}) and saves to the same history.\n\n\
-             Close its black console window first, then start this app again."
-        ));
-        return Ok(());
-    }
 
     // Software renderer: draws text cleanly (the GPU renderer nudged some letters off the line).
     // The window has no Windows title bar; keep Windows 11's rounded corners and shadow anyway.
@@ -611,6 +749,11 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     wire_window(&app);
     startup(&app, &shared);
     refresh(&app, &shared);
+    let saved_handle = shared.lock().setting_str("x76Handle");
+    if let Some(h) = saved_handle {
+        link_profile(&app, &shared, h); // linked earlier: load the card again
+    }
+    load_rank_icons(&app, &shared);
 
     let (poller, notify_to, weak) = (shared.clone(), shared.clone(), app.as_weak());
     std::thread::spawn(move || {
@@ -618,6 +761,19 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             let s = notify_to.clone();
             let _ = weak.upgrade_in_event_loop(move |app| if full { refresh(&app, &s) } else { tick(&app, &s) });
         })
+    });
+
+    // follow R5Reloaded's log for opponents (only finds anything if the game mod is on)
+    let (r5_shared, r5_weak) = (shared.clone(), app.as_weak());
+    std::thread::spawn(move || {
+        let mut tail = r5log::Tail::default();
+        loop {
+            if r5_shared.scan_r5(&mut tail) {
+                let s = r5_shared.clone();
+                let _ = r5_weak.upgrade_in_event_loop(move |app| refresh(&app, &s));
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
     });
 
     let ticker = slint::Timer::default();
@@ -637,6 +793,6 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
 fn main() {
     if let Err(e) = run(std::env::args().collect()) {
-        win::message(&format!("Elo Tracker hit an error and stopped:\n\n{e}"));
+        win::message(&format!("x76tracker hit an error and stopped:\n\n{e}"));
     }
 }
