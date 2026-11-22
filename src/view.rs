@@ -4,6 +4,7 @@ use crate::tracker::{key_of, now, Core, Favorite, Game, Hit, Player, Snap};
 use crate::{
     ChangeEntry, ChangeItem, ChangeMedia, ChangeSection, ShareCard, ShareGame, UpdatesPage,
     ChartData, ChartPoint, DiscordPage, EventDetail, EventRow, FightDetail, GameData, GameRank, Opponent, PlayerCard, ProfileCard, SearchResult,
+    RivalFight, RivalPage, RivalTile,
     ServerGame, ServerRow, ServersPage, StatChange, StaticText, Tick, WidgetSlot,
 };
 use chrono::{DateTime, Local, TimeZone};
@@ -74,6 +75,8 @@ pub struct UiState {
     pub search_seq: [u64; 2],
     /// The result whose detail panel is open: (card key, row id).
     pub detail: Option<(String, String)>,
+    /// The opponent whose head-to-head panel is open: (card key, opponent's name).
+    pub rival: Option<(String, String)>,
     /// Row ids already on each card's board (new ones fade in) and the points/Elo last shown (they tick).
     pub seen: HashMap<String, HashSet<String>>,
     pub shown_nums: HashMap<String, (f64, f64)>,
@@ -534,6 +537,8 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
     let mine = fights_for(core, game, &fav.id);
     // Quake Live: your accuracy over this period's fights (the ladder has none)
     let fight_acc: Vec<f64> = mine.iter().filter(|f| f.t >= start).filter_map(|f| f.my_acc).collect();
+    let in_period: Vec<&crate::r5log::Fight> = mine.iter().copied().filter(|f| f.t >= start).collect();
+    let (nemesis, victim) = rivals_of(&in_period);
     let show_elo = metric_is_elo(core, &key);
     let show_all = ui.show_all.contains(&key);
     let chart_data = chart(h, start, show_elo);
@@ -610,7 +615,194 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
         site24_places_dir: pos24.map(|v| v.signum() as i32).unwrap_or(0),
         first: idx == 0,
         last: idx + 1 == count,
+        nemesis: s(nemesis.as_ref().map(|r| r.name.as_str()).unwrap_or_default()),
+        nemesis_rec: s(nemesis.as_ref().map(|r| format!("{}–{}", r.wins, r.losses)).unwrap_or_default()),
+        victim: s(victim.as_ref().map(|r| r.name.as_str()).unwrap_or_default()),
+        victim_rec: s(victim.as_ref().map(|r| format!("{}–{}", r.wins, r.losses)).unwrap_or_default()),
     }
+}
+
+// ------------------------------------------------------------------ rivals
+/// Your record against one opponent, in some set of fights.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rival {
+    /// Their name in the newest of these fights.
+    pub name: String,
+    pub wins: i64,
+    pub losses: i64,
+}
+
+/// Who an opponent is across fights: their SteamID where the ladder knew it (Quake Live), else
+/// their name (names can change, SteamIDs can't).
+fn opp_key(f: &crate::r5log::Fight) -> String {
+    f.opp_id.clone().unwrap_or_else(|| f.opponent.to_lowercase())
+}
+
+/// Every opponent in these fights with your record against them, most fights first.
+pub fn records(fights: &[&crate::r5log::Fight]) -> Vec<Rival> {
+    let mut by: HashMap<String, (Rival, f64, usize)> = HashMap::new();
+    for f in fights.iter().filter(|f| !f.opponent.is_empty()) {
+        let e = by.entry(opp_key(f)).or_insert_with(|| (Rival { name: f.opponent.clone(), wins: 0, losses: 0 }, f.t, 0));
+        if f.kind == "kill" {
+            e.0.wins += 1;
+        } else {
+            e.0.losses += 1;
+        }
+        if f.t >= e.1 {
+            e.0.name = f.opponent.clone();
+            e.1 = f.t;
+        }
+        e.2 += 1;
+    }
+    let mut out: Vec<(Rival, f64, usize)> = by.into_values().collect();
+    out.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.total_cmp(&a.1)));
+    out.into_iter().map(|x| x.0).collect()
+}
+
+/// Nemesis (beats you most, at least twice and at least as often as you beat them) and favourite
+/// victim (you beat most, at least twice and more often than they beat you).
+pub fn rivals_of(fights: &[&crate::r5log::Fight]) -> (Option<Rival>, Option<Rival>) {
+    let all = records(fights);
+    let nemesis = all
+        .iter()
+        .filter(|r| r.losses >= 2 && r.losses >= r.wins)
+        .max_by(|a, b| (a.losses - a.wins).cmp(&(b.losses - b.wins)).then(a.losses.cmp(&b.losses)))
+        .cloned();
+    let victim = all
+        .iter()
+        .filter(|r| r.wins >= 2 && r.wins > r.losses)
+        .max_by(|a, b| (a.wins - a.losses).cmp(&(b.wins - b.losses)).then(a.wins.cmp(&b.wins)))
+        .cloned();
+    (nemesis, victim)
+}
+
+/// The head-to-head panel: a tracked player's record against one opponent, from every fight the
+/// game logs have.
+pub fn rival_page(core: &Core, key: &str, opponent: &str) -> Option<RivalPage> {
+    const SHOWN: usize = 25;
+    let (game_id, fav_id) = key.split_once(':')?;
+    let game = Game::from_id(game_id)?;
+    core.state.favorites.iter().find(|f| f.game == game_id && f.id == fav_id)?;
+    let mine = fights_for(core, game, fav_id);
+    // the opponent by SteamID where known, so a renamed player keeps their history
+    let id = mine.iter().rev().find(|f| f.opponent.eq_ignore_ascii_case(opponent)).and_then(|f| f.opp_id.clone());
+    let mut fights: Vec<&crate::r5log::Fight> = mine
+        .into_iter()
+        .filter(|f| f.opponent.eq_ignore_ascii_case(opponent) || (id.is_some() && f.opp_id == id))
+        .collect();
+    if fights.is_empty() {
+        return None;
+    }
+    fights.sort_by(|a, b| b.t.total_cmp(&a.t)); // newest first
+    let newest = fights[0];
+    let name = newest.opponent.clone();
+    let wins = fights.iter().filter(|f| f.kind == "kill").count() as i64;
+    let losses = fights.len() as i64 - wins;
+    let chance_of = |f: &crate::r5log::Fight| f.my_elo.zip(f.opp_elo).map(|(m, o)| win_chance(m, o));
+    let upset = |f: &crate::r5log::Fight| {
+        let won = f.kind == "kill";
+        chance_of(f).is_some_and(|c| (won && c < 0.35) || (!won && c > 0.65))
+    };
+
+    // them now (latest ladder check), else as they were at the last fight
+    let board = core.boards.get(&game);
+    let now_p = board.and_then(|bd| {
+        id.as_ref()
+            .and_then(|i| bd.by_id.get(i))
+            .or_else(|| bd.by_id.get(&name))
+            .and_then(|v| v.first())
+            .map(|&i| &bd.players[i])
+            .or_else(|| bd.players.iter().find(|p| p.name.eq_ignore_ascii_case(&name)))
+    });
+    let their_elo = now_p.and_then(|p| p.elo).or(newest.opp_elo);
+    let tier = now_p.map(|p| p.tier.clone()).or_else(|| newest.opp_tier.clone()).unwrap_or_default();
+    let rank = now_p.map(|p| p.rank).or(newest.opp_rank);
+    let my_elo = core.latest.get(key).and_then(Option::as_ref).and_then(|p| p.elo).or(newest.my_elo);
+
+    let n = fights.len() as i64;
+    let mut tiles = vec![RivalTile {
+        label: s("RECORD"),
+        value: s(format!("{wins}–{losses}")),
+        sub: s(format!("{:.0}% won · {} fight{}", wins as f64 * 100.0 / n as f64, n, if n == 1 { "" } else { "s" })),
+        dir: (wins - losses).signum() as i32,
+    }];
+    if let Some(e) = their_elo {
+        let gap = my_elo.map(|m| e - m);
+        let mut sub = match gap {
+            Some(g) if g.abs() >= 0.5 => format!("{} {} you", thousands(g.abs().round() as i64), if g > 0.0 { "above" } else { "below" }),
+            Some(_) => "same as you".into(),
+            None => String::new(),
+        };
+        if let Some(m) = my_elo {
+            sub = format!("{sub} · {:.0}% on paper", win_chance(m, e) * 100.0);
+        }
+        tiles.push(RivalTile { label: s("ELO NOW"), value: s(thousands(e.round() as i64)), sub: s(sub), dir: 0 });
+    }
+    let accs: Vec<(f64, f64)> = fights.iter().filter_map(|f| f.my_acc.zip(f.opp_acc)).collect();
+    if !accs.is_empty() {
+        let k = accs.len() as f64;
+        let (me, them) = (accs.iter().map(|a| a.0).sum::<f64>() / k, accs.iter().map(|a| a.1).sum::<f64>() / k);
+        tiles.push(RivalTile {
+            label: s("ACCURACY"),
+            value: s(format!("{} vs {}", pct(me), pct(them))),
+            sub: s(format!("you vs them, {} fight{}", accs.len(), if accs.len() == 1 { "" } else { "s" })),
+            dir: if (me - them).abs() < 0.5 { 0 } else if me > them { 1 } else { -1 },
+        });
+    } else {
+        let (uw, ul) = (fights.iter().filter(|f| f.kind == "kill" && upset(f)).count(), fights.iter().filter(|f| f.kind != "kill" && upset(f)).count());
+        tiles.push(RivalTile { label: s("UPSETS"), value: s(format!("{uw} · {ul}")), sub: s("won · lost"), dir: 0 });
+    }
+    let first = fights.last().unwrap();
+    tiles.push(RivalTile { label: s("FIRST MET"), value: s(short_when(first.t)), sub: s(format!("last {}", clock_day(newest.t))), dir: 0 });
+
+    let rows: Vec<RivalFight> = fights
+        .iter()
+        .take(SHOWN)
+        .map(|f| {
+            let gap = f.opp_elo.zip(f.my_elo).map(|(o, m)| o - m);
+            RivalFight {
+                when: s(clock_day(f.t)),
+                won: f.kind == "kill",
+                elo: s(f.opp_elo.map(|e| thousands(e.round() as i64)).unwrap_or_default()),
+                gap: s(gap.filter(|g| g.abs() >= 0.5).map(|g| thousands(g.abs().round() as i64)).unwrap_or_default()),
+                gap_dir: gap.map(|g| if g >= 0.5 { 1 } else if g <= -0.5 { -1 } else { 0 }).unwrap_or(0),
+                acc: s(match (f.my_acc, f.opp_acc) {
+                    (Some(m), Some(o)) => format!("{} · {}", pct(m), pct(o)),
+                    _ => String::new(),
+                }),
+                upset: upset(f),
+            }
+        })
+        .collect();
+    let lead = (wins - losses).signum() as i32;
+    let headline = match lead {
+        1 => format!("You lead {wins}–{losses}"),
+        -1 => format!("{name} leads {losses}–{wins}"),
+        _ => format!("Even at {wins}–{losses}"),
+    };
+    let tracked = core.state.favorites.iter().any(|f| f.game == game_id && (Some(&f.id) == id.as_ref() || f.id.eq_ignore_ascii_case(&name)));
+    let track_id = if game == Game::Ql { id.clone().unwrap_or_default() } else { name.clone() };
+    Some(RivalPage {
+        open: true,
+        key: s(key),
+        game: s(game_id),
+        name: s(name.as_str()),
+        tier: s(tier.as_str()),
+        tier_key: if tier.is_empty() { -1 } else { tier_key(&tier) },
+        rank: s(rank.map(|r| format!("#{}", thousands(r))).unwrap_or_default()),
+        headline: s(headline),
+        lead,
+        tiles: model(tiles),
+        fights: model(rows),
+        more: s(if fights.len() > SHOWN { format!("and {} older fights", fights.len() - SHOWN) } else { String::new() }),
+        can_track: !tracked && !track_id.is_empty(),
+        track_id: s(track_id),
+        has_acc: !accs.is_empty(),
+        hint: s(format!(
+            "Every fight with {name} that x76tracker has read from {}. Elo and the gap are from the last ladder check before each fight.",
+            if game == Game::Ql { "Quake Live's console log" } else { "R5Reloaded's game log" }
+        )),
+    })
 }
 
 pub fn game_data(core: &Core, game: Game, period: Period, ui: &UiState) -> GameData {
@@ -1403,4 +1595,40 @@ pub fn discord_status(core: &Core) -> DiscordStatus {
         None => (String::new(), false, false),
     };
     DiscordStatus { rpc, widget, layout }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::r5log::Fight;
+
+    fn fight(t: f64, kind: &str, opp: &str, id: Option<&str>) -> Fight {
+        Fight { t, kind: kind.into(), me: "me".into(), opponent: opp.into(), opp_id: id.map(String::from), ..Default::default() }
+    }
+
+    #[test]
+    fn records_and_rivals() {
+        let fs = vec![
+            fight(1.0, "death", "am9u", Some("1")),
+            fight(2.0, "death", "am9u", Some("1")),
+            fight(3.0, "kill", "am9u", Some("1")),
+            // a rename: same SteamID, so the same opponent, shown by their newest name
+            fight(4.0, "death", "am9u2", Some("1")),
+            fight(5.0, "kill", "chamame", None),
+            fight(6.0, "kill", "Chamame", None),
+            fight(7.0, "kill", "ed", None),
+            fight(8.0, "death", "", None),
+        ];
+        let refs: Vec<&Fight> = fs.iter().collect();
+        let all = records(&refs);
+        assert_eq!(all[0], Rival { name: "am9u2".into(), wins: 1, losses: 3 });
+        assert_eq!(all[1], Rival { name: "Chamame".into(), wins: 2, losses: 0 });
+        assert_eq!(all.len(), 3); // the unknown killer isn't an opponent
+        let (nemesis, victim) = rivals_of(&refs);
+        assert_eq!(nemesis.map(|r| r.name), Some("am9u2".into()));
+        assert_eq!(victim.map(|r| r.name), Some("Chamame".into()));
+        // one win isn't a favourite victim; one loss isn't a nemesis
+        let few: Vec<&Fight> = fs[6..8].iter().collect();
+        assert_eq!(rivals_of(&few), (None, None));
+    }
 }

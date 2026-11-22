@@ -33,6 +33,8 @@ export struct PlayerCard {
     first: bool, last: bool,
     // numbers for the ticking points and Elo: what showed last time, and the new values
     has-num: bool, points-num: float, points-from: float, elo-num: float, elo-from: float,
+    // the period's nemesis (beats you most) and favourite victim, with your record against them
+    nemesis: string, nemesis-rec: string, victim: string, victim-rec: string,
 }
 export struct SearchResult { id: string, rank: string, name: string, tier: string, tier-key: int, points: string, alias: string, tracked: bool }
 export struct GameData { id: string, label: string, mode: string, placeholder: string, players: [PlayerCard] }
@@ -42,6 +44,14 @@ export struct FightDetail {
     when: string, won: bool, opponent: string, tier: string, tier-key: int, rank: string,
     elo: string, points: string, gap: string, gap-dir: int, chance: string, upset: bool,
     now: string, rated: bool, can-track: bool, track-id: string, acc: string,
+}
+// head-to-head: a tracked player's record against one opponent
+export struct RivalTile { label: string, value: string, sub: string, dir: int }
+export struct RivalFight { when: string, won: bool, elo: string, gap: string, gap-dir: int, acc: string, upset: bool }
+export struct RivalPage {
+    open: bool, key: string, game: string, name: string, tier: string, tier-key: int, rank: string,
+    headline: string, lead: int, tiles: [RivalTile], fights: [RivalFight], more: string,
+    can-track: bool, track-id: string, has-acc: bool, hint: string,
 }
 export struct EventDetail {
     open: bool, key: string, game: string, title: string, subtitle: string,
@@ -102,6 +112,8 @@ export global Actions {
     callback dismiss-banner();
     callback open-event(key: string, id: string);
     callback close-event();
+    callback open-rival(key: string, opponent: string);
+    callback close-rival();
     callback profile-link(handle: string);
     callback profile-unlink();
     callback open-x76();
@@ -969,6 +981,36 @@ component PlayerCardView inherits Rectangle {
                     if root.p.site24-places-dir != 0: Delta { text: root.p.site24-places; dir: root.p.site24-places-dir; size: 11px; mono: true; }
                 }
             }
+            if root.p.nemesis != "" || root.p.victim != "": HorizontalLayout {
+                alignment: start;
+                spacing: 16px;
+                if root.p.nemesis != "": HorizontalLayout {
+                    spacing: 5px;
+                    Mono { text: "nemesis"; }
+                    Mono {
+                        text: root.p.nemesis;
+                        font-weight: 500;
+                        color: nem-ta.has-hover ? Theme.accent-fg : Theme.fg;
+                        overflow: elide;
+                        max-width: 160px;
+                        nem-ta := TouchArea { mouse-cursor: pointer; clicked => { Actions.open-rival(root.p.key, root.p.nemesis); } }
+                    }
+                    Mono { text: root.p.nemesis-rec; color: Theme.danger; }
+                }
+                if root.p.victim != "": HorizontalLayout {
+                    spacing: 5px;
+                    Mono { text: "favourite victim"; }
+                    Mono {
+                        text: root.p.victim;
+                        font-weight: 500;
+                        color: vic-ta.has-hover ? Theme.accent-fg : Theme.fg;
+                        overflow: elide;
+                        max-width: 160px;
+                        vic-ta := TouchArea { mouse-cursor: pointer; clicked => { Actions.open-rival(root.p.key, root.p.victim); } }
+                    }
+                    Mono { text: root.p.victim-rec; color: Theme.positive; }
+                }
+            }
         }
     }
 }
@@ -1602,6 +1644,8 @@ component StatTile inherits Rectangle {
 component FightCard inherits Rectangle {
     in property <FightDetail> f;
     in property <string> game;
+    // the result's card, for the head-to-head
+    in property <string> key;
     background: Theme.surface;
     border-radius: 10px;
     card-ta := TouchArea { }
@@ -1624,7 +1668,15 @@ component FightCard inherits Rectangle {
             HorizontalLayout {
                 spacing: 8px;
                 alignment: start;
-                Text { text: root.f.opponent; font-size: 15px; font-weight: 600; color: Theme.fg; overflow: elide; min-width: 0px; }
+                Text {
+                    text: root.f.opponent;
+                    font-size: 15px;
+                    font-weight: 600;
+                    color: opp-ta.has-hover ? Theme.accent-fg : Theme.fg;
+                    overflow: elide;
+                    min-width: 0px;
+                    opp-ta := TouchArea { mouse-cursor: pointer; clicked => { Actions.open-rival(root.key, root.f.opponent); } }
+                }
                 if root.f.upset: VerticalLayout {
                     alignment: center;
                     Rectangle {
@@ -1750,8 +1802,165 @@ component EventPanel inherits Rectangle {
                     for c in root.d.stats: StatTile { c: c; horizontal-stretch: 1; }
                 }
                 if root.d.fights.length > 0: Eyebrow { text: "FIGHTS FROM THE GAME LOG"; }
-                for f in root.d.fights: FightCard { f: f; game: root.d.game; }
+                for f in root.d.fights: FightCard { f: f; game: root.d.game; key: root.d.key; }
                 Text { text: root.d.hint; font-size: 12px; color: Theme.fg-faint; wrap: word-wrap; }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- head-to-head
+component RivalTileView inherits Rectangle {
+    in property <RivalTile> t;
+    background: Theme.surface;
+    border-radius: 10px;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 4px;
+        Eyebrow { text: root.t.label; font-size: 10.5px; }
+        Text {
+            text: root.t.value;
+            font-size: 17px;
+            font-weight: 600;
+            letter-spacing: -0.3px;
+            color: root.t.dir > 0 ? Theme.positive : root.t.dir < 0 ? Theme.danger : Theme.fg;
+            overflow: elide;
+        }
+        Mono { text: root.t.sub; font-size: 11px; wrap: word-wrap; }
+    }
+}
+
+component RivalFightRow inherits Rectangle {
+    in property <RivalFight> f;
+    in property <bool> has-acc;
+    height: 40px;
+    background: Theme.surface;
+    border-radius: 8px;
+    row-ta := TouchArea { }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 14px;
+        spacing: 12px;
+        // the same width for WIN and LOSS, so the times line up
+        VerticalLayout { alignment: center; horizontal-stretch: 0; min-width: 46px; HorizontalLayout { alignment: start; Chip { text: root.f.won ? "WIN" : "LOSS"; kind: root.f.won ? 1 : -1; } } }
+        Mono { text: root.f.when; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+        if root.f.upset: VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+            Rectangle {
+                border-radius: self.height / 2;
+                background: root.f.won ? transparent : Theme.danger;
+                if root.f.won: RainbowFill { width: parent.width; height: parent.height; border-radius: parent.height / 2; play: row-ta.has-hover; }
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    Mono { text: "upset"; font-size: 10.5px; font-weight: 600; color: root.f.won ? #17161a : #ffffff; height: 17px; }
+                }
+            }
+        }
+        if root.has-acc: Mono { text: root.f.acc; vertical-alignment: center; horizontal-stretch: 0; min-width: 76px; horizontal-alignment: right; }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 6px;
+            horizontal-stretch: 0;
+            min-width: 120px;
+            Mono { text: root.f.elo; color: Theme.fg; vertical-alignment: center; }
+            if root.f.gap-dir != 0: VerticalLayout { alignment: center; Delta { text: root.f.gap; dir: root.f.gap-dir; size: 11px; mono: true; neutral: true; } }
+        }
+    }
+}
+
+component RivalPanel inherits Rectangle {
+    in property <RivalPage> r;
+    // opening: fade in and rise (a Timer tween; Slint's `animate` jumps to the end in the real window)
+    property <float> k: 0;
+    Timer { interval: 16ms; running: root.k < 1; triggered => { root.k = min(1, root.k + 16 / 240); } }
+    property <float> ek: 1 - Math.pow(1 - root.k, 3);
+    opacity: root.ek;
+    background: #000000a6;
+    TouchArea { clicked => { Actions.close-rival(); } }
+    panel := Rectangle {
+        width: min(640px, root.width - 48px);
+        height: min(root.height - 64px, body.preferred-height + 2px);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2 + (1 - root.ek) * 22px;
+        background: Theme.canvas;
+        border-radius: 16px;
+        border-width: 1px;
+        border-color: Theme.line-2;
+        clip: true;
+        TouchArea { }
+        inner := ScrollView {
+            content-width: self.visible-width;
+            content-height: body.preferred-height;
+            body := VerticalLayout {
+                width: inner.visible-width;
+                padding: 22px;
+                spacing: 14px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout { alignment: center; horizontal-stretch: 0; Gem { tier-key: root.r.tier-key; size: 44px; } }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 3px;
+                        horizontal-stretch: 1;
+                        Eyebrow { text: "HEAD TO HEAD"; }
+                        Text { text: root.r.name; font-size: 22px; font-weight: 600; letter-spacing: -0.4px; color: Theme.fg; overflow: elide; }
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 8px;
+                            if root.r.tier != "": Mono { text: root.r.tier; font-weight: 600; color: Theme.tier-color(root.r.tier-key); }
+                            if root.r.rank != "": Mono { text: root.r.rank; }
+                        }
+                    }
+                    if root.r.can-track: VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 0;
+                        Button { text: "Track"; kind: 1; clicked => { Actions.track(root.r.game, root.r.track-id); } }
+                    }
+                    VerticalLayout {
+                        alignment: start;
+                        horizontal-stretch: 0;
+                        RoundButton { icon: "M 2.5 2.5 L 9.5 9.5 M 9.5 2.5 L 2.5 9.5"; clicked => { Actions.close-rival(); } }
+                    }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    Rectangle {
+                        border-radius: self.height / 2;
+                        background: root.r.lead > 0 ? Theme.positive.with-alpha(0.16) : root.r.lead < 0 ? Theme.danger.with-alpha(0.16) : Theme.surface-2;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            padding-top: 4px;
+                            padding-bottom: 4px;
+                            Text {
+                                text: root.r.headline;
+                                font-size: 14px;
+                                font-weight: 600;
+                                color: root.r.lead > 0 ? Theme.positive : root.r.lead < 0 ? Theme.danger : Theme.fg;
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    for t in root.r.tiles: RivalTileView { t: t; horizontal-stretch: 1; }
+                }
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 14px;
+                    spacing: 12px;
+                    Eyebrow { text: "FIGHTS"; horizontal-stretch: 1; }
+                    if root.r.has-acc: Eyebrow { text: "YOU · THEM"; horizontal-stretch: 0; min-width: 76px; horizontal-alignment: right; }
+                    Eyebrow { text: "THEIR ELO THEN"; horizontal-stretch: 0; min-width: 120px; horizontal-alignment: right; }
+                }
+                VerticalLayout {
+                    spacing: 6px;
+                    for f in root.r.fights: RivalFightRow { f: f; has-acc: root.r.has-acc; }
+                }
+                if root.r.more != "": Mono { text: root.r.more; }
+                Text { text: root.r.hint; font-size: 12px; color: Theme.fg-faint; wrap: word-wrap; }
             }
         }
     }
@@ -2716,6 +2925,7 @@ export component AppWindow inherits Window {
     in property <image> avatar;
     in property <image> banner;
     in property <EventDetail> detail;
+    in property <RivalPage> rival;
     in-out property <int> tab; // 0 ladders, 1 servers
     in property <ServersPage> servers;
     in property <string> servers-status;
@@ -3243,6 +3453,14 @@ export component AppWindow inherits Window {
         width: root.width;
         height: root.height - 64px;
         d: root.detail;
+    }
+
+    // ------------------------------------------------ head-to-head (also over the result panel it may come from)
+    if root.rival.open: RivalPanel {
+        y: 64px;
+        width: root.width;
+        height: root.height - 64px;
+        r: root.rival;
     }
 
     // ------------------------------------------------ share card

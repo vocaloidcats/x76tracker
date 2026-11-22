@@ -260,6 +260,8 @@ fn refresh(app: &AppWindow, shared: &Shared) {
     let (has_avatar, has_banner) = PICS.with(|p| *p.borrow());
     app.set_profile(view::profile_card(&core, has_avatar, has_banner));
     app.set_share(view::share_card(&core, has_avatar, has_banner));
+    let open_rival = UI.with(|ui| ui.borrow().rival.clone());
+    app.set_rival(open_rival.and_then(|(key, opp)| view::rival_page(&core, &key, &opp)).unwrap_or_default());
     let open_detail = UI.with(|ui| ui.borrow().detail.clone());
     app.set_detail(open_detail.and_then(|(key, id)| view::event_detail(&core, &key, &id)).unwrap_or_default());
     app.set_period(period.index());
@@ -579,6 +581,24 @@ fn wire(app: &AppWindow, shared: &Arc<Shared>) {
         let (w, s) = ctx!();
         move |key, id| {
             UI.with(|ui| ui.borrow_mut().detail = Some((key.to_string(), id.to_string())));
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_open_rival({
+        let (w, s) = ctx!();
+        move |key, opponent| {
+            UI.with(|ui| ui.borrow_mut().rival = Some((key.to_string(), opponent.to_string())));
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_close_rival({
+        let (w, s) = ctx!();
+        move || {
+            UI.with(|ui| ui.borrow_mut().rival = None);
             if let Some(app) = w.upgrade() {
                 refresh(&app, &s);
             }
@@ -1295,6 +1315,8 @@ mod screenshot {
         pub detail_upset: bool,
         /// which game's result that is: "r5" (the default) or "ql"
         pub detail_game: String,
+        /// open the head-to-head with the most-fought opponent of this game's first tracked player
+        pub rival: Option<String>,
         /// show the Servers tab
         pub servers_tab: bool,
         /// open Settings on this tab (0 general, 1 Experimental: Discord, 2 updates)
@@ -1381,6 +1403,17 @@ mod screenshot {
                     if let Some(i) = (1..h.len()).rev().find(|&i| has_fights(i)) {
                         UI.with(|ui| ui.borrow_mut().detail = Some((key.clone(), view::row_id(h[i].t))));
                     }
+                }
+            }
+        }
+        if let Some(game) = &o.rival {
+            let core = shared.lock();
+            let fav = core.state.favorites.iter().find(|f| &f.game == game);
+            let fights = if game == "ql" { &core.ql_fights } else { &core.fights };
+            if let Some(f) = fav {
+                let mine: Vec<&r5log::Fight> = fights.iter().filter(|x| x.me.eq_ignore_ascii_case(&f.id)).collect();
+                if let Some(top) = view::records(&mine).first() {
+                    UI.with(|ui| ui.borrow_mut().rival = Some((tracker::key_of(game, &f.id), top.name.clone())));
                 }
             }
         }
@@ -1556,6 +1589,7 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 detail: args.iter().any(|a| a == "--detail"),
                 detail_upset: args.iter().any(|a| a == "--detail-upset"),
                 detail_game: arg_value(&args, "--detail-game").unwrap_or_else(|| "r5".into()),
+                rival: arg_value(&args, "--rival"),
                 servers_tab: arg_value(&args, "--tab").as_deref() == Some("servers"),
                 settings: arg_value(&args, "--settings").map(|v| match v.as_str() {
                     "experimental" | "widget" => 1,
@@ -1594,6 +1628,7 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 detail: false,
                 detail_upset: false,
                 detail_game: String::new(),
+                rival: None,
                 servers_tab: false,
                 settings: None,
                 click: None,
