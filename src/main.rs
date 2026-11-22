@@ -1297,7 +1297,7 @@ mod screenshot {
         pub detail_game: String,
         /// show the Servers tab
         pub servers_tab: bool,
-        /// open Settings on this tab (0 general, 1 Discord widget)
+        /// open Settings on this tab (0 general, 1 Experimental: Discord, 2 updates)
         pub settings: Option<i32>,
         /// click here before the final frame (e.g. to open a dropdown)
         pub click: Option<(f32, f32)>,
@@ -1558,7 +1558,7 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 detail_game: arg_value(&args, "--detail-game").unwrap_or_else(|| "r5".into()),
                 servers_tab: arg_value(&args, "--tab").as_deref() == Some("servers"),
                 settings: arg_value(&args, "--settings").map(|v| match v.as_str() {
-                    "widget" => 1,
+                    "experimental" | "widget" => 1,
                     "updates" => 2,
                     _ => 0,
                 }),

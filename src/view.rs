@@ -1169,7 +1169,7 @@ pub fn discord_page(core: &Core) -> DiscordPage {
         "Shows as “Playing x76tracker”.".to_string()
     } else {
         let name = if cfg.widget_name.is_empty() { "your widget's app".to_string() } else { format!("your widget's app (“{}”)", cfg.widget_name) };
-        format!("Shows as {name}, so the widget's “while playing” panel appears with it. Change this on the Discord widget tab.")
+        format!("Shows as {name}, so the widget's “while playing” panel appears with it. Change this under Discord profile widget, below.")
     };
     DiscordPage {
         rpc: cfg.rpc,

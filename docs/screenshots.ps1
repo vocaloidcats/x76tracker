@@ -4,8 +4,8 @@
 #   .\docs\screenshots.ps1                       dark theme, into docs\images
 #   .\docs\screenshots.ps1 -Theme light -Out C:\shots
 #
-# What shows up is your real data: your x76 profile, tracked players and, on the Discord widget
-# tab, your Application ID and Discord user ID. Look the images over before publishing them.
+# What shows up is your real data: your x76 profile, tracked players and, on the Experimental
+# tab, your Discord Application ID and user ID. Look the images over before publishing them.
 param(
     [string]$Exe = (Join-Path $PSScriptRoot "..\target\release\x76tracker.exe"),
     [string]$Out = (Join-Path $PSScriptRoot "images"),
@@ -25,12 +25,17 @@ $shots = [ordered]@{
     "result-detail"    = @("--detail")
     "servers"          = @("--tab", "servers")
     "settings-general" = @("--settings", "general")
-    "settings-widget"  = @("--settings", "widget")
+    "settings-widget"  = @("--settings", "experimental", "--size", "1440x1500")
     "settings-updates" = @("--settings", "updates")
 }
 foreach ($name in $shots.Keys) {
     $file = Join-Path (Resolve-Path $Out) "$name-$Theme.png"
-    $argList = @("--data-dir", "`"$data`"", "--screenshot", "`"$file`"", "--size", $Size, "--$Theme") + $shots[$name]
+    $argList = @("--data-dir", "`"$data`"", "--screenshot", "`"$file`"", "--$Theme")
+    # a shot may bring its own --size (taller pages); otherwise the default
+    if ($shots[$name] -notcontains "--size") { $argList += @("--size", $Size) }
+    $argList += $shots[$name]
+    # so a failed render can't pass for done with the old picture
+    Remove-Item $file -ErrorAction SilentlyContinue
     Start-Process -FilePath $Exe -ArgumentList $argList -Wait -NoNewWindow
     if (Test-Path $file) { Write-Host "rendered $file" } else { Write-Warning "no image for $name" }
 }

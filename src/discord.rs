@@ -238,6 +238,9 @@ fn per_game(list: &[(&str, &str)]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for g in [Game::R5, Game::Ql] {
         for (id, menu) in list {
+            if (*id == "best_win" || *id == "card_best") && g != Game::R5 {
+                continue; // the widget's best win stays R5Reloaded's
+            }
             out.push((format!("{}.{id}", g.id()), format!("{} {menu}", short(g))));
         }
     }

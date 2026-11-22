@@ -2398,10 +2398,15 @@ component SettingsPanel inherits Rectangle {
                 }
                 HorizontalLayout {
                     alignment: start;
-                    Pills { options: ["General", "Discord widget", "Updates"]; selected: root.tab; chosen(i) => { root.tab = i; } }
+                    // tab numbers stay as they were (0 general, 1 Discord, 2 updates); Discord is shown last, as Experimental
+                    Pills {
+                        options: ["General", "Updates", "Experimental"];
+                        selected: root.tab == 0 ? 0 : root.tab == 2 ? 1 : 2;
+                        chosen(i) => { root.tab = i == 0 ? 0 : i == 1 ? 2 : 1; }
+                    }
                 }
 
-                // ---------------------------------------- general: Rich Presence, whose numbers
+                // ---------------------------------------- general: whose numbers, the game logs
                 if root.tab == 0: Rectangle {
                     // switching here: fade in and slide up (Timer tween)
                     property <float> k: 0;
@@ -2414,19 +2419,9 @@ component SettingsPanel inherits Rectangle {
                     tabbody1 := VerticalLayout {
                         y: (1 - parent.ek) * 8px;
                     spacing: 16px;
-                    Eyebrow { text: "RICH PRESENCE"; }
-                    SettingRow {
-                        on: root.d.rpc;
-                        title: "Show my x76 rank on Discord while I play";
-                        body: "While R5Reloaded or Quake Live is running, your Discord status shows your tier, rank, Elo and your last 48 hours. Discord just has to be open on this PC.";
-                        toggled(v) => { Actions.rpc(v); }
-                    }
-                    StatusLine { text: root.rpc-status; state: root.rpc-state; }
-                    Mono { text: root.d.rpc-app; font-size: 11px; color: Theme.fg-faint; wrap: word-wrap; }
-                    Rectangle { height: 1px; background: Theme.line-1; }
                     Eyebrow { text: "YOUR PLAYERS"; }
                     Text {
-                        text: "Rich Presence and the widget show these players' numbers. Track yourself on the Ladders tab, then pick yourself here.";
+                        text: "The share card shows these players' numbers (and Discord does, if you turn it on under Experimental). Track yourself on the Ladders tab, then pick yourself here.";
                         font-size: 13px;
                         color: Theme.fg-muted;
                         wrap: word-wrap;
@@ -2472,7 +2467,7 @@ component SettingsPanel inherits Rectangle {
                 }
                 }
 
-                // ---------------------------------------- the profile widget (apps that already have one)
+                // ---------------------------------------- experimental: Discord (Rich Presence, and the profile widget for apps that already have one)
                 if root.tab == 1: Rectangle {
                     // switching here: fade in and slide up (Timer tween)
                     property <float> k: 0;
@@ -2485,6 +2480,23 @@ component SettingsPanel inherits Rectangle {
                     tabbody2 := VerticalLayout {
                         y: (1 - parent.ek) * 8px;
                     spacing: 16px;
+                    Text {
+                        text: "Discord features that are still experimental. Both stay off until you turn them on.";
+                        font-size: 14px;
+                        color: Theme.fg-muted;
+                        wrap: word-wrap;
+                    }
+                    Eyebrow { text: "RICH PRESENCE"; }
+                    SettingRow {
+                        on: root.d.rpc;
+                        title: "Show my x76 rank on Discord while I play";
+                        body: "While R5Reloaded or Quake Live is running, your Discord status shows your tier, rank, Elo and your last 48 hours. Discord just has to be open on this PC.";
+                        toggled(v) => { Actions.rpc(v); }
+                    }
+                    StatusLine { text: root.rpc-status; state: root.rpc-state; }
+                    Mono { text: root.d.rpc-app; font-size: 11px; color: Theme.fg-faint; wrap: word-wrap; }
+                    Rectangle { height: 1px; background: Theme.line-1; }
+                    Eyebrow { text: "DISCORD PROFILE WIDGET"; }
                     Text {
                         text: "Already have a Discord app with a profile widget? x76tracker can fill the widget's User Data fields with your x76 stats. Discord stopped giving widgets to new apps, so this only works with an app that got one before the cutoff.";
                         font-size: 14px;

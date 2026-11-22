@@ -46,20 +46,20 @@ The same for Quake Live's LG arena, without changing the game. Quake Live can sa
 - The log has no times in it, so a fight gets the time x76tracker read it, a couple of seconds after it happened. Fights from while x76tracker was closed get estimated times, and Quake Live starts the log over each time the game starts.
 - The account folder's name is your SteamID, which is also your id on the Quake Live ladder, so the fights go to the right player.
 
-![A Quake Live result: two wins and a loss against the same opponent, with their tier, rank, Elo and both players' accuracy](docs/changelog/2.2.3-ql-fights@2x.png)
+![A Quake Live result: two wins and a loss against the same opponent, with their tier, rank, Elo and both players' accuracy](docs/changelog/2.3.0-ql-fights@2x.png)
 
-## Discord (optional)
+## Discord (experimental)
 
-Open **Settings** (the sliders button in the title bar).
+Both Discord features are experimental and off until you turn them on, in **Settings → Experimental** (Settings is the sliders button in the title bar).
 
 - **Rich Presence:** while R5Reloaded or Quake Live is running, your Discord status shows your tier, rank, Elo and your last 48 hours. Discord just has to be open on the same PC; there's no login.
-- **Profile widget:** for people who already have a Discord app with a profile widget (Discord no longer gives widgets to new apps). On the **Discord widget** tab, enter the app's Application ID and paste its bot token. x76tracker reads the widget's layout and fills each field set to *User Data* with a stat you pick (current numbers or the last 48 hours), at most every 5 minutes. In a *Collection* layout each item becomes a card with a picture: your x76 rank emblem, or an emoji that follows your results. In a *Progress* layout, the bar shows how far you are through your tier. The token is stored encrypted for your Windows account (`discord-token.bin`) and only sent to Discord.
+- **Profile widget:** for people who already have a Discord app with a profile widget (Discord no longer gives widgets to new apps). Under **Discord profile widget**, enter the app's Application ID and paste its bot token. x76tracker reads the widget's layout and fills each field set to *User Data* with a stat you pick (current numbers or the last 48 hours), at most every 5 minutes. In a *Collection* layout each item becomes a card with a picture: your x76 rank emblem, or an emoji that follows your results. In a *Progress* layout, the bar shows how far you are through your tier. The token is stored encrypted for your Windows account (`discord-token.bin`) and only sent to Discord.
 
-![Settings, General tab: Rich Presence, whose numbers Discord shows, and the R5Reloaded opponents switch](docs/images/settings-general-dark.png)
+![Settings, General tab: whose numbers the share card shows, and the R5Reloaded and Quake Live opponents switches](docs/images/settings-general-dark.png)
 
-| The Discord widget tab | What it fills in on Discord |
+| Settings → Experimental | What the widget fills in on Discord |
 |---|---|
-| ![Settings, Discord widget tab: the widget's two fields (Objective and Progress), what fills each, and a preview of the values](docs/images/settings-widget-dark.png) | ![A Discord profile widget: Diamond III #348, 48h: 321-244 · +2,061 pts · up from Plat I, and a progress bar at 433/1000](docs/images/discord-widget.png) |
+| ![Settings, Experimental tab: Rich Presence, then the widget's two fields (Objective and Progress), what fills each, and a preview of the values](docs/images/settings-widget-dark.png) | ![A Discord profile widget: Diamond III #348, 48h: 321-244 · +2,061 pts · up from Plat I, and a progress bar at 433/1000](docs/images/discord-widget.png) |
 
 ## Options
 
