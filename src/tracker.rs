@@ -325,6 +325,12 @@ pub struct Core {
     /// worth telling about it: (is an error, text).
     pub r5patch: Option<crate::r5patch::State>,
     pub r5patch_note: Option<(bool, String)>,
+    /// New versions on GitHub: the last check, the download, a verified copy ready to swap in.
+    pub updater: crate::update::Live,
+    /// Share card export: running, the last outcome (is an error, text), the last saved file.
+    pub share_busy: bool,
+    pub share_note: Option<(bool, String)>,
+    pub share_saved: Option<PathBuf>,
 }
 
 pub struct Shared {
@@ -366,6 +372,10 @@ impl Shared {
                 discord: crate::discord::Live { token, ..Default::default() },
                 r5patch: None,
                 r5patch_note: None,
+                updater: crate::update::Live::default(),
+                share_busy: false,
+                share_note: None,
+                share_saved: None,
             }),
             wake: Mutex::new(false),
             wake_cv: Condvar::new(),

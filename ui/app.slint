@@ -66,6 +66,21 @@ export struct DiscordPage {
     slots: [WidgetSlot], statics: [StaticText],
     tile-options: [string], text-options: [string], image-options: [string], card-options: [string], progress-options: [string],
 }
+// Settings → Updates. available = a newer version ("" when up to date); notes = its release notes
+// Share card: change = points over 48h without sign (change-dir carries it); record = "321-244 · 48h"
+export struct ShareGame { label: string, tier: string, tier-key: int, rank: string, points: string, elo: string, change: string, change-dir: int, record: string, has-chart: bool, chart: ChartData }
+export struct ShareCard { ok: bool, name: string, handle: string, initial: string, supporter: bool, has-avatar: bool, has-banner: bool, date: string, games: [ShareGame] }
+// What's new. A picture is still (one frame) or animated; aspect = height / width.
+// natural = width in points (pixels / density), so a picture is never stretched past its own size
+export struct ChangeMedia { has: bool, ready: bool, failed: bool, alt: string, frames: [image], frame-ms: int, aspect: float, natural: float }
+export struct ChangeItem { title: string, text: string, media: ChangeMedia }
+// kind: 0 new (green), 1 improved (blue), 2 fixed (red), 3 other
+export struct ChangeSection { title: string, kind: int, items: [ChangeItem] }
+export struct ChangeEntry { version: string, note: string, current: bool, available: bool, hero: ChangeMedia, sections: [ChangeSection] }
+export struct UpdatesPage {
+    version: string, auto-check: bool, auto-install: bool, dev-build: bool,
+    available: string, can-install: bool, busy: bool, page: string,
+}
 
 // ---------------------------------------------------------------- actions (handled in Rust)
 export global Actions {
@@ -104,6 +119,14 @@ export global Actions {
     callback open-url(url: string);
     callback r5-patch(on: bool);
     callback r5-path(folder: string);
+    callback update-check();
+    callback update-install();
+    callback update-setting(which: string, on: bool);
+    callback card-opened();
+    callback card-save();
+    callback card-reveal();
+    callback changelog-opened();
+    callback changelog-closed();
 }
 
 // Implemented in Rust: turns normalised chart points into a step-line path at a given pixel size.
@@ -330,6 +353,37 @@ component Chip inherits Rectangle {
             color: root.kind > 0 ? Theme.positive : root.kind < 0 ? Theme.danger : Theme.fg-muted;
         }
     }
+}
+
+// x76's rainbow. Each time `play` turns on (the pointer arrives), one wave washes through it:
+// eased in and out, never linear. A finished wave is exactly one rainbow-width of travel, so it
+// comes to rest on the same picture it started from: no jump at the end, no jitter on hover.
+component RainbowFill inherits Rectangle {
+    in property <bool> play;
+    property <int> waves: 0;
+    // whole numbers at rest; the animation carries it smoothly to the next one
+    property <float> wave: root.waves;
+    animate wave { duration: 1500ms; easing: cubic-bezier(0.6, 0.0, 0.2, 1.0); }
+    changed play => {
+        if (root.play) {
+            root.waves += 1;
+        }
+    }
+    property <float> f: root.wave - Math.floor(root.wave);
+    // an invisible opacity change makes partial redraw repaint the moving gradient
+    opacity: 1 - root.f * 0.001;
+    // the colours drift right as f goes 0 → 1 (one full rainbow), then f is 0 again
+    property <float> s0: root.f - 1;
+    property <float> s1: root.f - 0.75;
+    property <float> s2: root.f - 0.5;
+    property <float> s3: root.f - 0.25;
+    property <float> s4: root.f;
+    property <float> s5: root.f + 0.25;
+    property <float> s6: root.f + 0.5;
+    property <float> s7: root.f + 0.75;
+    property <float> s8: root.f + 1;
+    background: @linear-gradient(90deg, #6fe3ff root.s0, #9d7bff root.s1, #f07ae0 root.s2, #c6f07a root.s3,
+        #6fe3ff root.s4, #9d7bff root.s5, #f07ae0 root.s6, #c6f07a root.s7, #6fe3ff root.s8);
 }
 
 component SearchBox inherits Rectangle {
@@ -775,7 +829,8 @@ component PlayerCardView inherits Rectangle {
                                 alignment: center;
                                 Rectangle {
                                     border-radius: self.height / 2;
-                                    background: o.won ? @linear-gradient(115deg, #6fe3ff 0%, #9d7bff 35%, #f07ae0 65%, #c6f07a 100%) : Theme.danger;
+                                    background: o.won ? transparent : Theme.danger;
+                                    if o.won: RainbowFill { width: parent.width; height: parent.height; border-radius: parent.height / 2; play: row-ta.has-hover; }
                                     HorizontalLayout {
                                         padding-left: 6px;
                                         padding-right: 6px;
@@ -967,8 +1022,9 @@ component Pill inherits Rectangle {
     in property <bool> on-image;
     in property <bool> shiny;
     border-radius: self.height / 2;
-    background: root.shiny ? @linear-gradient(115deg, #6fe3ff 0%, #9d7bff 35%, #f07ae0 65%, #c6f07a 100%)
-        : root.on-image ? #ffffff2e : Theme.surface;
+    background: root.shiny ? transparent : root.on-image ? #ffffff2e : Theme.surface;
+    if root.shiny: RainbowFill { width: parent.width; height: parent.height; border-radius: parent.height / 2; play: pill-ta.has-hover; }
+    pill-ta := TouchArea { }
     HorizontalLayout {
         padding-left: 9px;
         padding-right: 9px;
@@ -1129,15 +1185,280 @@ component ProfileCardView inherits Rectangle {
             }
         }
     }
-    // unlink, top right
-    Rectangle {
-        x: root.width - 26px - 12px;
+    // share card and unlink, top right
+    HorizontalLayout {
+        x: root.width - self.preferred-width - 12px;
         y: 12px;
-        width: 26px;
+        width: self.preferred-width;
         height: 26px;
+        spacing: 8px;
+        Rectangle {
+            border-radius: self.height / 2;
+            background: share-ta.has-hover ? #ffffff40 : #ffffff26;
+            HorizontalLayout {
+                padding-left: 11px;
+                padding-right: 11px;
+                Text { text: "Share card"; font-size: 12px; font-weight: 600; color: root.img ? #ffffff : Theme.fg; vertical-alignment: center; }
+            }
+            share-ta := TouchArea { mouse-cursor: pointer; clicked => { Actions.card-opened(); } }
+        }
         RoundButton {
             icon: "M 2.5 2.5 L 9.5 9.5 M 9.5 2.5 L 2.5 9.5";
             clicked => { Actions.profile-unlink(); }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- share card (exportable PNG)
+// Always drawn dark, whatever the app theme, so a shared card looks the same everywhere.
+component ShareGameTile inherits Rectangle {
+    in property <ShareGame> g;
+    pure function tier-ink(k: int) -> color {
+        return k == 1 ? #d98a56 : k == 2 ? #b7c3cd : k == 3 ? #e8b93a : k == 4 ? #57c9b8
+            : k == 5 ? #7098ea : k == 6 ? #b985f0 : k == 7 ? #ffd977 : #a6a29a;
+    }
+    property <color> ink: root.tier-ink(root.g.tier-key);
+    background: #ffffff0f;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: #ffffff1a;
+    VerticalLayout {
+        padding: 12px;
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 6px;
+        HorizontalLayout {
+            spacing: 10px;
+            VerticalLayout { alignment: center; horizontal-stretch: 0; Gem { tier-key: root.g.tier-key; size: 44px; } }
+            VerticalLayout {
+                alignment: center;
+                spacing: 2px;
+                horizontal-stretch: 1;
+                Text { text: root.g.label; font-family: Theme.mono; font-size: 9.5px; letter-spacing: 0.5px; color: #ffffff8c; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    Text { text: root.g.tier; font-size: 16px; font-weight: 600; letter-spacing: -0.2px; color: root.ink; overflow: elide; min-width: 0px; }
+                    Text { text: root.g.rank; font-family: Theme.mono; font-size: 11px; color: #ffffffb3; vertical-alignment: center; }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: 2px;
+                horizontal-stretch: 0;
+                Text { text: root.g.points + "P"; font-size: 16px; font-weight: 600; color: #ffffff; horizontal-alignment: right; }
+                Text { text: root.g.elo + " elo"; font-family: Theme.mono; font-size: 10.5px; color: #ffffffa6; horizontal-alignment: right; }
+            }
+        }
+        // points over the last 48 hours
+        spark := Rectangle {
+            height: 30px;
+            if root.g.has-chart: Path {
+                width: spark.width;
+                height: spark.height;
+                viewbox-width: spark.width / 1px;
+                viewbox-height: spark.height / 1px;
+                commands: ChartMath.step-path(root.g.chart.points, spark.width / 1px, spark.height / 1px, true);
+                fill: root.ink;
+                opacity: 0.14;
+            }
+            if root.g.has-chart: Path {
+                width: spark.width;
+                height: spark.height;
+                viewbox-width: spark.width / 1px;
+                viewbox-height: spark.height / 1px;
+                commands: ChartMath.step-path(root.g.chart.points, spark.width / 1px, spark.height / 1px, false);
+                stroke: root.ink;
+                stroke-width: 1.5px;
+            }
+            if !root.g.has-chart: Rectangle { y: parent.height - 1px; height: 1px; background: #ffffff1f; }
+        }
+        HorizontalLayout {
+            spacing: 7px;
+            alignment: start;
+            if root.g.change-dir != 0: HorizontalLayout {
+                spacing: 3px;
+                VerticalLayout {
+                    alignment: center;
+                    Path {
+                        width: 6px;
+                        height: 5.5px;
+                        viewbox-width: 10;
+                        viewbox-height: 9;
+                        commands: root.g.change-dir > 0 ? "M 5 0 L 10 9 L 0 9 Z" : "M 0 0 L 10 0 L 5 9 Z";
+                        fill: root.g.change-dir > 0 ? #57c87f : #e0665a;
+                    }
+                }
+                Text { text: root.g.change; font-family: Theme.mono; font-size: 10.5px; font-weight: 600; color: root.g.change-dir > 0 ? #57c87f : #e0665a; vertical-alignment: center; }
+            }
+            Text { text: root.g.record; font-family: Theme.mono; font-size: 10.5px; color: #ffffff8c; vertical-alignment: center; }
+        }
+    }
+}
+
+component ShareCardView inherits Rectangle {
+    in property <ShareCard> c;
+    in property <image> avatar;
+    in property <image> banner;
+    in property <bool> rounded: true;
+    property <length> strip: 118px;
+    width: 640px;
+    height: 336px;
+    border-radius: root.rounded ? 20px : 0px;
+    clip: true;
+    background: #18171a;
+    // banner strip, fading into the card
+    Rectangle {
+        y: 0;
+        height: root.strip;
+        clip: true;
+        background: @linear-gradient(135deg, #2f2b29 0%, #1d1c1f 100%);
+        if root.c.has-banner: Image { width: parent.width; height: parent.height; source: root.banner; image-fit: cover; }
+        Rectangle { background: @linear-gradient(180deg, #18171a00 45%, #18171a 100%); }
+        // brand, top right
+        Rectangle {
+            x: parent.width - self.width - 16px;
+            y: 14px;
+            width: brand.preferred-width;
+            height: 26px;
+            border-radius: 13px;
+            background: #0000008c;
+            brand := HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 11px;
+                spacing: 6px;
+                VerticalLayout {
+                    alignment: center;
+                    Path {
+                        width: 13px;
+                        height: 13px;
+                        viewbox-width: 32;
+                        viewbox-height: 32;
+                        commands: "M 6 22 L 12 22 L 12 16 L 18 16 L 18 11 L 26 11";
+                        stroke: #ffffff;
+                        stroke-width: 2.6px;
+                    }
+                }
+                Text { text: "x76tracker"; font-size: 11.5px; font-weight: 600; color: #ffffff; vertical-alignment: center; }
+            }
+        }
+    }
+    // avatar, overlapping the banner
+    Rectangle {
+        x: 22px;
+        y: 66px;
+        width: 92px;
+        height: 92px;
+        border-radius: 46px;
+        background: #18171a;
+        Rectangle {
+            x: 5px;
+            y: 5px;
+            width: 82px;
+            height: 82px;
+            border-radius: 41px;
+            background: #ffffff26;
+            if root.c.has-avatar: Image { width: parent.width; height: parent.height; source: root.avatar; image-fit: cover; }
+            if !root.c.has-avatar: Text {
+                text: root.c.initial;
+                font-size: 32px;
+                font-weight: 600;
+                color: #ffffff;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+    // name, handle and date, beside the avatar
+    VerticalLayout {
+        x: 128px;
+        y: root.strip + 4px;
+        width: root.width - 128px - 24px;
+        height: 54px;
+        spacing: 4px;
+        alignment: center;
+        HorizontalLayout {
+            spacing: 10px;
+            Text { text: root.c.name; font-size: 24px; font-weight: 600; letter-spacing: -0.48px; color: #ffffff; overflow: elide; min-width: 0px; horizontal-stretch: 1; }
+            Text { text: root.c.date; font-family: Theme.mono; font-size: 10.5px; color: #ffffff80; vertical-alignment: center; horizontal-stretch: 0; }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            if root.c.handle != "": Text { text: "@" + root.c.handle; font-family: Theme.mono; font-size: 12px; color: #ffffffb3; vertical-alignment: center; }
+            if root.c.supporter: Pill { text: "supporter"; shiny: true; }
+        }
+    }
+    // one tile per game
+    HorizontalLayout {
+        x: 22px;
+        y: 186px;
+        width: root.width - 44px;
+        height: root.height - 186px - 22px;
+        spacing: 12px;
+        for g in root.c.games: ShareGameTile { g: g; horizontal-stretch: 1; }
+        if root.c.games.length == 0: Text {
+            text: "Track yourself on the Ladders tab to put your ranks on this card.";
+            font-size: 14px;
+            color: #ffffffb3;
+            wrap: word-wrap;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// The card with Save PNG, over the page.
+component SharePanel inherits Rectangle {
+    in property <ShareCard> c;
+    in property <image> avatar;
+    in property <image> banner;
+    in property <string> status;
+    in property <bool> status-error;
+    in property <bool> busy;
+    in property <bool> saved;
+    callback close();
+    property <bool> shown;
+    init => { root.shown = true; }
+    opacity: root.shown ? 1 : 0;
+    animate opacity { duration: 160ms; easing: ease-out; }
+    background: #000000a6;
+    TouchArea { clicked => { root.close(); } }
+    panel := Rectangle {
+        width: 640px + 48px;
+        height: body.preferred-height;
+        x: (root.width - self.width) / 2;
+        y: max(16px, (root.height - self.height) / 2) + (root.shown ? 0px : 18px);
+        animate y { duration: 220ms; easing: ease-out; }
+        background: Theme.canvas;
+        border-radius: 16px;
+        border-width: 1px;
+        border-color: Theme.line-2;
+        TouchArea { } // clicks inside stay inside
+        body := VerticalLayout {
+            padding: 24px;
+            spacing: 16px;
+            HorizontalLayout {
+                spacing: 12px;
+                VerticalLayout {
+                    spacing: 4px;
+                    horizontal-stretch: 1;
+                    Text { text: "Share card"; font-size: 22px; font-weight: 600; letter-spacing: -0.4px; color: Theme.fg; }
+                    Text { text: "Your profile and ranks as a picture, for Discord or anywhere else."; font-size: 13px; color: Theme.fg-muted; }
+                }
+                VerticalLayout {
+                    alignment: start;
+                    horizontal-stretch: 0;
+                    RoundButton { icon: "M 2.5 2.5 L 9.5 9.5 M 9.5 2.5 L 2.5 9.5"; clicked => { root.close(); } }
+                }
+            }
+            ShareCardView { c: root.c; avatar: root.avatar; banner: root.banner; }
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                Button { text: root.busy ? "Saving…" : "Save PNG"; enabled: !root.busy && root.c.ok; clicked => { Actions.card-save(); } }
+                if root.saved: Button { text: "Show in folder"; kind: 1; clicked => { Actions.card-reveal(); } }
+            }
+            if root.status != "": Text { text: root.status; font-size: 12.5px; color: root.status-error ? Theme.danger : Theme.fg-muted; wrap: word-wrap; }
         }
     }
 }
@@ -1154,6 +1475,12 @@ component LinkProfileRow inherits HorizontalLayout {
         font-size: 12px;
         color: link-ta.has-hover ? Theme.fg : Theme.accent-fg;
         link-ta := TouchArea { mouse-cursor: pointer; clicked => { root.open = true; } }
+    }
+    if !root.open && !root.busy: Mono {
+        text: "· make a share card";
+        font-size: 12px;
+        color: card-ta.has-hover ? Theme.fg : Theme.fg-muted;
+        card-ta := TouchArea { mouse-cursor: pointer; clicked => { Actions.card-opened(); } }
     }
     if root.open || root.busy: HorizontalLayout {
         spacing: 10px;
@@ -1209,6 +1536,7 @@ component FightCard inherits Rectangle {
     in property <string> game;
     background: Theme.surface;
     border-radius: 10px;
+    card-ta := TouchArea { }
     HorizontalLayout {
         padding: 12px;
         padding-left: 14px;
@@ -1233,7 +1561,8 @@ component FightCard inherits Rectangle {
                     alignment: center;
                     Rectangle {
                         border-radius: self.height / 2;
-                        background: root.f.won ? @linear-gradient(115deg, #6fe3ff 0%, #9d7bff 35%, #f07ae0 65%, #c6f07a 100%) : Theme.danger;
+                        background: root.f.won ? transparent : Theme.danger;
+                        if root.f.won: RainbowFill { width: parent.width; height: parent.height; border-radius: parent.height / 2; play: card-ta.has-hover; }
                         HorizontalLayout {
                             padding-left: 8px;
                             padding-right: 8px;
@@ -1280,6 +1609,10 @@ component FightCard inherits Rectangle {
 
 component EventPanel inherits Rectangle {
     in property <EventDetail> d;
+    property <bool> shown;
+    init => { root.shown = true; }
+    opacity: root.shown ? 1 : 0;
+    animate opacity { duration: 160ms; easing: ease-out; }
     background: #000000a6;
     // a click outside the panel closes it
     TouchArea { clicked => { Actions.close-event(); } }
@@ -1287,7 +1620,8 @@ component EventPanel inherits Rectangle {
         width: min(700px, root.width - 48px);
         height: min(root.height - 64px, body.preferred-height + 2px);
         x: (root.width - self.width) / 2;
-        y: (root.height - self.height) / 2;
+        y: (root.height - self.height) / 2 + (root.shown ? 0px : 18px);
+        animate y { duration: 220ms; easing: ease-out; }
         background: Theme.canvas;
         border-radius: 16px;
         border-width: 1px;
@@ -1404,6 +1738,7 @@ component ServerRowView inherits Rectangle {
                     height: parent.height;
                     border-radius: 2.5px;
                     background: root.full ? Theme.warning : Theme.accent-fg;
+                    animate width { duration: 600ms; easing: ease-out; }
                 }
             }
         }
@@ -1705,6 +2040,219 @@ component SlotRow inherits Rectangle {
     }
 }
 
+// ---------------------------------------------------------------- What's new (Discord-style changelog)
+// A changelog picture: still, or animated (frames switch on Slint's animation clock).
+component MediaView inherits Rectangle {
+    in property <ChangeMedia> m;
+    property <length> w: root.m.ready && root.m.natural > 0 ? min(root.width, root.m.natural * 1px + 2px) : root.width;
+    height: root.m.ready ? (root.w - 2px) * root.m.aspect + 2px : 96px;
+    Rectangle {
+        x: 0;
+        width: root.w;
+        height: root.height;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.line-1;
+        if root.m.ready: Image {
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            height: parent.height - 2px;
+            image-fit: contain;
+            source: root.m.frames.length > 1
+                ? root.m.frames[Math.mod(Math.floor(animation-tick() / 1ms / max(10, root.m.frame-ms)), root.m.frames.length)]
+                : root.m.frames[0];
+        }
+        if !root.m.ready: Mono {
+            width: parent.width;
+            height: parent.height;
+            horizontal-alignment: center;
+            text: root.m.failed ? "(" + root.m.alt + ")" : "loading picture…";
+            color: Theme.fg-faint;
+        }
+    }
+}
+
+component ChangelogMenu inherits Rectangle {
+    in property <[ChangeEntry]> entries;
+    in-out property <int> selected;
+    in property <bool> can-install;
+    in property <bool> busy;
+    callback close();
+    property <ChangeEntry> e: root.entries[root.selected];
+    pure function ink(kind: int) -> color {
+        return kind == 0 ? Theme.positive : kind == 1 ? Theme.accent-fg : kind == 2 ? Theme.danger : Theme.fg-muted;
+    }
+    property <bool> shown;
+    init => { root.shown = true; }
+    opacity: root.shown ? 1 : 0;
+    animate opacity { duration: 160ms; easing: ease-out; }
+    background: #000000b3;
+    TouchArea { clicked => { root.close(); } }
+    panel := Rectangle {
+        width: min(780px, root.width - 48px);
+        height: root.height - 40px;
+        x: (root.width - self.width) / 2;
+        y: 20px + (root.shown ? 0px : 24px);
+        animate y { duration: 240ms; easing: ease-out; }
+        background: Theme.canvas;
+        border-radius: 16px;
+        border-width: 1px;
+        border-color: Theme.line-2;
+        clip: true;
+        TouchArea { } // clicks inside stay inside
+        VerticalLayout {
+            // header: title, versions, close
+            VerticalLayout {
+                padding: 22px;
+                padding-bottom: 14px;
+                spacing: 14px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout {
+                        spacing: 3px;
+                        horizontal-stretch: 1;
+                        Text { text: "What's new"; font-size: 24px; font-weight: 600; letter-spacing: -0.48px; color: Theme.fg; }
+                        Text { text: "x76tracker's changelog. Pick a version to see what it changed."; font-size: 13px; color: Theme.fg-muted; }
+                    }
+                    VerticalLayout {
+                        alignment: start;
+                        horizontal-stretch: 0;
+                        RoundButton { icon: "M 2.5 2.5 L 9.5 9.5 M 9.5 2.5 L 2.5 9.5"; clicked => { root.close(); } }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    for v[i] in root.entries: Rectangle {
+                        height: 30px;
+                        border-radius: 15px;
+                        background: i == root.selected ? Theme.action-bg : chip-ta.has-hover ? Theme.surface-2 : Theme.surface;
+                        animate background { duration: 140ms; }
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 6px;
+                            if v.available: VerticalLayout {
+                                alignment: center;
+                                Rectangle { width: 7px; height: 7px; border-radius: 3.5px; background: Theme.accent-fg; }
+                            }
+                            Text {
+                                text: v.version;
+                                font-size: 13px;
+                                font-weight: 600;
+                                color: i == root.selected ? Theme.action-fg : Theme.fg;
+                                vertical-alignment: center;
+                            }
+                        }
+                        chip-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.selected = i;
+                                sv.content-y = 0;
+                            }
+                        }
+                    }
+                }
+            }
+            Rectangle { height: 1px; background: Theme.line-1; }
+            sv := ScrollView {
+                vertical-stretch: 1;
+                content-width: self.visible-width;
+                content-height: body.preferred-height;
+                body := VerticalLayout {
+                    width: sv.visible-width;
+                    padding: 24px;
+                    padding-top: 20px;
+                    spacing: 18px;
+                    if root.e.available: Rectangle {
+                        background: Theme.surface;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: Theme.accent-fg;
+                        HorizontalLayout {
+                            padding: 14px;
+                            padding-left: 16px;
+                            spacing: 12px;
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 2px;
+                                horizontal-stretch: 1;
+                                Text { text: "x76tracker " + root.e.version + " is out"; font-size: 15px; font-weight: 600; color: Theme.fg; }
+                                Text { text: "It replaces this version when you install it. You can also let it install itself when you close x76tracker (Settings → Updates)."; font-size: 12.5px; color: Theme.fg-muted; wrap: word-wrap; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 0;
+                                Button { text: "Install and restart"; enabled: root.can-install && !root.busy; clicked => { Actions.update-install(); } }
+                            }
+                        }
+                    }
+                    if root.e.hero.has: MediaView { m: root.e.hero; }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        alignment: start;
+                        Text { text: root.e.version; font-size: 28px; font-weight: 600; letter-spacing: -0.56px; color: Theme.fg; vertical-alignment: center; }
+                        if root.e.current || root.e.available: VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                border-radius: self.height / 2;
+                                background: root.e.available ? Theme.accent-fg : Theme.surface-2;
+                                HorizontalLayout {
+                                    padding-left: 9px;
+                                    padding-right: 9px;
+                                    Mono {
+                                        text: root.e.available ? "new" : "this version";
+                                        font-size: 11px;
+                                        height: 20px;
+                                        font-weight: 600;
+                                        color: root.e.available ? (Theme.dark ? #17161a : #ffffff) : Theme.fg-muted;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if root.e.note != "": Text { text: root.e.note; font-size: 13.5px; color: Theme.fg-muted; wrap: word-wrap; }
+                    for sec in root.e.sections: VerticalLayout {
+                        spacing: 14px;
+                        if sec.title != "": HorizontalLayout {
+                            spacing: 10px;
+                            Text { text: sec.title; font-family: Theme.mono; font-size: 11.5px; font-weight: 600; letter-spacing: 0.6px; color: root.ink(sec.kind); horizontal-stretch: 0; vertical-alignment: center; }
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                Rectangle { height: 1px; background: root.ink(sec.kind).with-alpha(0.35); }
+                            }
+                        }
+                        for it in sec.items: VerticalLayout {
+                            spacing: 10px;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                VerticalLayout {
+                                    alignment: start;
+                                    padding-top: 7px;
+                                    horizontal-stretch: 0;
+                                    Rectangle { width: 6px; height: 6px; border-radius: 3px; background: root.ink(sec.kind); }
+                                }
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    horizontal-stretch: 1;
+                                    if it.title != "": Text { text: it.title; font-size: 15px; font-weight: 600; color: Theme.fg; wrap: word-wrap; }
+                                    Text { text: it.text; font-size: 13.5px; color: Theme.fg-muted; wrap: word-wrap; }
+                                }
+                            }
+                            if it.media.has: HorizontalLayout {
+                                padding-left: 16px;
+                                MediaView { m: it.media; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 component SettingsPanel inherits Rectangle {
     in property <DiscordPage> d;
     in property <[string]> previews;
@@ -1717,15 +2265,24 @@ component SettingsPanel inherits Rectangle {
     in property <bool> layout-busy;
     in property <string> patch-status;
     in property <int> patch-state;
+    in property <UpdatesPage> u;
+    in property <string> update-status;
+    in property <int> update-state;
     in-out property <int> tab;
     callback close();
+    callback whats-new();
+    property <bool> shown;
+    init => { root.shown = true; }
+    opacity: root.shown ? 1 : 0;
+    animate opacity { duration: 160ms; easing: ease-out; }
     background: #000000a6;
     TouchArea { clicked => { root.close(); } }
     panel := Rectangle {
         width: min(780px, root.width - 48px);
         height: min(root.height - 64px, body.preferred-height + 2px);
         x: (root.width - self.width) / 2;
-        y: (root.height - self.height) / 2;
+        y: (root.height - self.height) / 2 + (root.shown ? 0px : 18px);
+        animate y { duration: 220ms; easing: ease-out; }
         background: Theme.canvas;
         border-radius: 16px;
         border-width: 1px;
@@ -1754,7 +2311,7 @@ component SettingsPanel inherits Rectangle {
                 }
                 HorizontalLayout {
                     alignment: start;
-                    Pills { options: ["General", "Discord widget"]; selected: root.tab; chosen(i) => { root.tab = i; } }
+                    Pills { options: ["General", "Discord widget", "Updates"]; selected: root.tab; chosen(i) => { root.tab = i; } }
                 }
 
                 // ---------------------------------------- general: Rich Presence, whose numbers
@@ -1904,6 +2461,48 @@ component SettingsPanel inherits Rectangle {
                         }
                     }
                 }
+
+                // ---------------------------------------- updates and what's new
+                if root.tab == 2: VerticalLayout {
+                    spacing: 16px;
+                    Text { text: "x76tracker " + root.u.version; font-size: 18px; font-weight: 600; color: Theme.fg; }
+                    StatusLine { text: root.update-status; state: root.update-state; }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        alignment: start;
+                        if root.u.available != "": Button {
+                            text: "Install " + root.u.available + " and restart";
+                            enabled: root.u.can-install && !root.u.busy;
+                            clicked => { Actions.update-install(); }
+                        }
+                        Button { text: "Check now"; kind: 1; enabled: !root.u.busy; clicked => { Actions.update-check(); } }
+                        Button { text: "Releases on GitHub"; kind: 1; clicked => { Actions.open-url(root.u.page); } }
+                    }
+                    SettingRow {
+                        on: root.u.auto-check;
+                        title: "Check for updates";
+                        body: "When x76tracker starts and every 6 hours, it asks GitHub for the latest release. Nothing about you is sent.";
+                        toggled(v) => { Actions.update-setting("check", v); }
+                    }
+                    SettingRow {
+                        on: root.u.auto-install;
+                        title: "Install updates automatically";
+                        body: "A new version downloads in the background, is checked against the SHA-256 published with its release, and replaces this one when you close x76tracker.";
+                        toggled(v) => { Actions.update-setting("auto", v); }
+                    }
+                    Rectangle { height: 1px; background: Theme.line-1; }
+                    HorizontalLayout {
+                        spacing: 14px;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            horizontal-stretch: 1;
+                            Text { text: "What's new"; font-size: 15px; font-weight: 600; color: Theme.fg; }
+                            Text { text: "Every version's changes, with pictures."; font-size: 13px; color: Theme.fg-muted; }
+                        }
+                        VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Open changelog"; kind: 1; clicked => { root.whats-new(); } } }
+                    }
+                }
             }
         }
     }
@@ -1993,6 +2592,20 @@ export component AppWindow inherits Window {
     in property <bool> layout-busy;
     in property <string> patch-status;
     in property <int> patch-state;
+    in property <UpdatesPage> updates;
+    in property <[ChangeEntry]> changelog;
+    in-out property <bool> changelog-open;
+    in-out property <int> changelog-index;
+    // share card: the preview panel, its save state, and card-only rendering for the PNG export
+    in property <ShareCard> share;
+    in-out property <bool> card-open;
+    in property <bool> card-mode;
+    in property <string> card-status;
+    in property <bool> card-status-error;
+    in property <bool> card-busy;
+    in property <bool> card-saved;
+    in property <string> update-status;
+    in property <int> update-state;
     property <string> period-word: period == 0 ? "today" : period == 1 ? "last 24h" : "since tracking";
     property <bool> wide: sv.visible-width >= 1100px;
     // side margins (x76's 1376px container) and the width of each game column when side by side
@@ -2148,6 +2761,46 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+                // a new version is out
+                if root.updates.available != "": VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    Rectangle {
+                        height: 28px;
+                        border-radius: 14px;
+                        background: up-ta.has-hover ? Theme.accent-fg.darker(0.12) : Theme.accent-fg;
+                        // a slow pulse around it, so a new version gets noticed
+                        Rectangle {
+                            x: -4px;
+                            y: -4px;
+                            width: parent.width + 8px;
+                            height: parent.height + 8px;
+                            border-radius: self.height / 2;
+                            border-width: 2px;
+                            border-color: Theme.accent-fg;
+                            opacity: 0.1 + 0.45 * (1 + Math.sin(animation-tick() / 1ms * 0.18deg)) / 2;
+                        }
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            Text {
+                                text: "Update " + root.updates.available;
+                                font-size: 12.5px;
+                                font-weight: 600;
+                                color: Theme.dark ? #17161a : #ffffff;
+                                vertical-alignment: center;
+                            }
+                        }
+                        up-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.changelog-index = 0;
+                                root.changelog-open = true;
+                                Actions.changelog-opened();
                             }
                         }
                     }
@@ -2419,6 +3072,36 @@ export component AppWindow inherits Window {
         d: root.detail;
     }
 
+    // ------------------------------------------------ share card
+    if root.card-open: SharePanel {
+        y: 64px;
+        width: root.width;
+        height: root.height - 64px;
+        c: root.share;
+        avatar: root.avatar;
+        banner: root.banner;
+        status: root.card-status;
+        status-error: root.card-status-error;
+        busy: root.card-busy;
+        saved: root.card-saved;
+        close => { root.card-open = false; }
+    }
+
+    // ------------------------------------------------ what's new
+    if root.changelog-open: ChangelogMenu {
+        y: 64px;
+        width: root.width;
+        height: root.height - 64px;
+        entries: root.changelog;
+        selected <=> root.changelog-index;
+        can-install: root.updates.can-install;
+        busy: root.updates.busy;
+        close => {
+            root.changelog-open = false;
+            Actions.changelog-closed();
+        }
+    }
+
     // ------------------------------------------------ settings (same place as the detail panel)
     if root.settings-open: SettingsPanel {
         y: 64px;
@@ -2435,8 +3118,17 @@ export component AppWindow inherits Window {
         layout-busy: root.layout-busy;
         patch-status: root.patch-status;
         patch-state: root.patch-state;
+        u: root.updates;
+        update-status: root.update-status;
+        update-state: root.update-state;
         tab <=> root.settings-tab;
         close => { root.settings-open = false; }
+        whats-new => {
+            root.settings-open = false;
+            root.changelog-index = 0;
+            root.changelog-open = true;
+            Actions.changelog-opened();
+        }
     }
 
     // ------------------------------------------------ resize handles along the edges (off while maximized)
@@ -2448,4 +3140,14 @@ export component AppWindow inherits Window {
     if !WindowCtl.maximized: ResizeEdge { x: root.width - 2 * root.edge; y: root.height - 2 * root.edge; width: 2 * root.edge; height: 2 * root.edge; direction: 3; mouse-cursor: nwse-resize; }
     if !WindowCtl.maximized: ResizeEdge { x: 0; y: root.height - 2 * root.edge; width: 2 * root.edge; height: 2 * root.edge; direction: 5; mouse-cursor: nesw-resize; }
     if !WindowCtl.maximized: ResizeEdge { x: 0; y: 0; width: 2 * root.edge; height: 2 * root.edge; direction: 7; mouse-cursor: nwse-resize; }
+
+    // ------------------------------------------------ --card: only the card, for the PNG
+    if root.card-mode: ShareCardView {
+        x: 0;
+        y: 0;
+        c: root.share;
+        avatar: root.avatar;
+        banner: root.banner;
+        rounded: false;
+    }
 }

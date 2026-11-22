@@ -1,6 +1,6 @@
 [package]
 name = "x76tracker"
-version = "2.2.1"
+version = "2.2.2"
 edition = "2021"
 publish = false
 description = "x76tracker: unofficial live Elo/points tracker for the x76.gg Quake Live and R5Reloaded ladders"
@@ -30,6 +30,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # avatar and banner pictures from x76 profiles (WebP), plus PNG/JPEG just in case
 image = { version = "0.25", default-features = false, features = ["webp", "png", "jpeg"] }
 png = "0.17"
+# checks update downloads against the SHA-256 published with each release
+sha2 = "0.10"
+
+[features]
+# --screenshot and its options (recording, previews, clicks): for making the README and changelog
+# pictures. Release builds leave them out: `cargo build --release --features docs` to get them.
+docs = []
 
 [build-dependencies]
 slint-build = "1"

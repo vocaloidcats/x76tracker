@@ -2,6 +2,7 @@
 
 use crate::tracker::{key_of, now, Core, Favorite, Game, Hit, Player, Snap};
 use crate::{
+    ChangeEntry, ChangeItem, ChangeMedia, ChangeSection, ShareCard, ShareGame, UpdatesPage,
     ChartData, ChartPoint, DiscordPage, EventDetail, EventRow, FightDetail, GameData, GameRank, Opponent, PlayerCard, ProfileCard, SearchResult,
     ServerGame, ServerRow, ServersPage, StatChange, StaticText, Tick, WidgetSlot,
 };
@@ -881,6 +882,52 @@ pub fn profile_card(core: &Core, has_avatar: bool, has_banner: bool) -> ProfileC
     c
 }
 
+// ------------------------------------------------------------------ share card
+/// The share card: your x76 profile (if linked) and your players' ranks (Settings → your players).
+pub fn share_card(core: &Core, has_avatar: bool, has_banner: bool) -> ShareCard {
+    let cfg = crate::discord::Config::load(core);
+    let mut games = Vec::new();
+    let mut names = Vec::new();
+    for g in [Game::R5, Game::Ql] {
+        let Some(id) = cfg.player(core, g) else { continue };
+        let Some(st) = player_stats(core, g, &id) else { continue };
+        names.push(core.state.favorites.iter().find(|f| f.game == g.id() && f.id == id).map(|f| f.name.clone()).unwrap_or_else(|| id.clone()));
+        let (change, change_dir) = match st.recent_points {
+            Some(d) if d != 0 => (format!("{}P", thousands(d.abs())), d.signum() as i32),
+            _ => (String::new(), 0),
+        };
+        let played = st.recent_wins + st.recent_losses;
+        // points over the same 48 hours, for the sparkline
+        let spark = core.state.history.get(&key_of(g.id(), &id)).and_then(|h| chart(h, now() - RECENT_SECS, false));
+        games.push(ShareGame {
+            has_chart: spark.is_some(),
+            chart: spark.unwrap_or_default(),
+            label: s(g.label().to_uppercase()),
+            tier: s(if st.tier.is_empty() { "Unranked".to_string() } else { st.tier.clone() }),
+            tier_key: tier_key(&st.tier),
+            rank: s(st.rank.map(|r| format!("#{}", thousands(r))).unwrap_or_default()),
+            points: s(st.points.map(thousands).unwrap_or_else(|| "–".into())),
+            elo: s(st.elo.map(|e| thousands(e.round() as i64)).unwrap_or_else(|| "–".into())),
+            change: s(change),
+            change_dir,
+            record: s(if played > 0 { format!("{}-{} · 48h", st.recent_wins, st.recent_losses) } else { "no games · 48h".to_string() }),
+        });
+    }
+    let profile = core.profile.as_ref();
+    let name = profile.map(|p| p.display_name.clone()).or_else(|| names.first().cloned()).unwrap_or_else(|| "x76 player".into());
+    ShareCard {
+        ok: profile.is_some() || !games.is_empty(),
+        initial: s(name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default()),
+        name: s(name),
+        handle: s(profile.map(|p| p.handle.clone()).unwrap_or_default()),
+        supporter: profile.is_some_and(|p| p.supporter),
+        has_avatar: profile.is_some() && has_avatar,
+        has_banner: profile.is_some() && has_banner,
+        date: s(Local::now().format("%b %-d, %Y").to_string()),
+        games: model(games),
+    }
+}
+
 // ------------------------------------------------------------------ servers page
 /// Step chart of a whole-number series (player counts) over time.
 fn count_chart(pts: &[(f64, f64)], word: &str) -> Option<ChartData> {
@@ -1115,6 +1162,108 @@ pub fn discord_page(core: &Core) -> DiscordPage {
 pub fn discord_previews(core: &Core) -> ModelRc<SharedString> {
     let cfg = crate::discord::Config::load(core);
     model(cfg.layout.iter().map(|slot| s(crate::discord::preview(core, &cfg, slot))).collect())
+}
+
+// ------------------------------------------------------------------ settings: updates
+/// "New" green, "Improved" blue, "Fixed" red, anything else plain.
+fn section_kind(title: &str) -> i32 {
+    match title.to_lowercase().as_str() {
+        t if t.starts_with("new") || t.starts_with("added") => 0,
+        t if t.starts_with("improv") || t.starts_with("changed") => 1,
+        t if t.starts_with("fix") => 2,
+        _ => 3,
+    }
+}
+
+/// The What's new menu: a newer release on GitHub first (with its notes), then CHANGELOG.md.
+/// `media` turns a picture reference into what the UI shows (loading, ready, failed).
+pub fn changelog(core: &Core, media: &dyn Fn(&crate::update::Media) -> ChangeMedia) -> Vec<ChangeEntry> {
+    use crate::update::{parse_changelog, CHANGELOG};
+    let mut entries: Vec<(crate::update::Entry, bool)> = Vec::new();
+    if let Some(r) = core.updater.newer() {
+        entries.extend(parse_changelog(&r.notes, &r.version).into_iter().take(1).map(|e| (e, true)));
+    }
+    entries.extend(parse_changelog(CHANGELOG, "").into_iter().map(|e| (e, false)));
+    entries
+        .into_iter()
+        .map(|(e, available)| ChangeEntry {
+            current: e.version == crate::tracker::VERSION,
+            available,
+            hero: e.hero.as_ref().map(media).unwrap_or_default(),
+            note: s(e.note.as_str()),
+            sections: model(
+                e.sections
+                    .iter()
+                    .map(|sec| ChangeSection {
+                        title: s(sec.title.to_uppercase()),
+                        kind: section_kind(&sec.title),
+                        items: model(
+                            sec.items
+                                .iter()
+                                .map(|it| ChangeItem {
+                                    title: s(it.lead.as_str()),
+                                    text: s(it.text.as_str()),
+                                    media: it.media.as_ref().map(media).unwrap_or_default(),
+                                })
+                                .collect(),
+                        ),
+                    })
+                    .collect(),
+            ),
+            version: s(e.version),
+        })
+        .collect()
+}
+
+pub fn updates_page(core: &Core) -> UpdatesPage {
+    use crate::update::{auto_check, auto_install, dev_build, RELEASES_PAGE};
+    let u = &core.updater;
+    let newer = u.newer();
+    let dev = dev_build();
+    UpdatesPage {
+        version: s(crate::tracker::VERSION),
+        auto_check: auto_check(core),
+        auto_install: auto_install(core),
+        dev_build: dev,
+        available: s(newer.map(|r| r.version.clone()).unwrap_or_default()),
+        can_install: newer.is_some() && !dev,
+        busy: u.checking || u.progress.is_some(),
+        page: s(newer.map(|r| r.page.clone()).unwrap_or_else(|| RELEASES_PAGE.to_string())),
+    }
+}
+
+/// The Updates tab's status line: (text, state as for Discord's lines).
+pub fn update_status(core: &Core) -> (String, i32) {
+    use crate::update::{auto_check, auto_install, dev_build};
+    let u = &core.updater;
+    let newer = u.newer();
+    if let Some(p) = u.progress {
+        let v = newer.map(|r| r.version.as_str()).unwrap_or("the update");
+        return (format!("Downloading {v}… {}%", (p * 100.0).round()), 1);
+    }
+    if u.checking {
+        return ("Checking GitHub for a new version…".into(), 1);
+    }
+    if let Some(e) = &u.error {
+        return (e.clone(), 3);
+    }
+    if let Some(r) = newer {
+        let dev = dev_build();
+        return match &u.staged {
+            Some((v, _)) if *v == r.version && auto_install(core) && !dev => (format!("{v} is downloaded and checked. It's installed when you close x76tracker."), 2),
+            Some((v, _)) if *v == r.version => (format!("{v} is downloaded and checked. Press Install to restart into it."), 2),
+            _ if dev => (
+                format!("{} is available. This copy runs from cargo's build folder, so it never replaces itself; rebuild instead.", r.version),
+                1,
+            ),
+            _ => (format!("{} is available.", r.version), 1),
+        };
+    }
+    match u.checked_at {
+        Some(t) => (format!("You're up to date. Checked {}.", ago(Some(t))), 2),
+        None if !auto_check(core) => ("Automatic checks are off.".into(), 0),
+        None => ("Not checked yet.".into(), 0),
+    }
 }
 
 /// The R5Reloaded patch's status line: (text, state as for Discord's lines).

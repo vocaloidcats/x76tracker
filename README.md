@@ -4,6 +4,8 @@ A Windows app (download `x76tracker.exe` from the [Releases](../../releases/late
 
 > Unofficial and community-made. Not affiliated with x76.gg.
 
+![x76tracker on a desktop: an x76 profile card, then a Quake Live and an R5Reloaded player with points, Elo, wins and losses, a points chart and the latest results](docs/images/hero.jpg)
+
 ## Use it
 
 1. Run `x76tracker.exe`. Nothing to install.
@@ -18,6 +20,11 @@ What you get:
 - **Results list:** the elo and points change of each result.
 - **Live updates:** cards light up green or red when something changes.
 - **Servers tab:** live player counts on x76's Quake Live and R5Reloaded servers.
+- **Share card:** your profile and ranks as a PNG for Discord or anywhere else (Share card on your profile, then Save PNG).
+
+![A share card: avatar and banner, name and handle, then each game's rank emblem, tier, rank, points, Elo and last 48 hours](docs/images/share-card.png)
+
+![The Servers tab: players on now, today's peak and a chart for each game, then every server with its map and how full it is](docs/images/servers-dark.png)
 
 ## R5Reloaded opponents (optional)
 
@@ -28,21 +35,44 @@ The x76 ladder only shows totals, so on its own x76tracker can't tell who you fo
 - If a game update replaces the file, x76tracker puts the patch back while it's running. To undo it by hand, copy the backup over the file or repair the game in the R5Reloaded launcher.
 - The game is found in the usual install folders (`R5R Library`). If yours is somewhere else, enter its folder in Settings.
 
+![A result's details: the fight from the game log with the opponent, their tier, rank and Elo, how far above or below you they were, and your chance of winning on paper](docs/images/result-detail-dark.png)
+
 ## Discord (optional)
 
 Open **Settings** (the sliders button in the title bar).
 
-- **Rich Presence:** while R5Reloaded or Quake Live is running, your Discord status shows your tier, rank, Elo and today's record. Discord just has to be open on the same PC; there's no login.
-- **Profile widget:** for people who already have a Discord app with a profile widget (Discord no longer gives widgets to new apps). On the **Discord widget** tab, enter the app's Application ID and paste its bot token. x76tracker reads the widget's layout and fills each field set to *User Data* with a stat you pick (current numbers or the last 48 hours), at most every 5 minutes. In a *Collection* layout each item becomes a card with a picture: your x76 rank emblem, or an emoji that follows your results. The token is stored encrypted for your Windows account (`discord-token.bin`) and only sent to Discord.
+- **Rich Presence:** while R5Reloaded or Quake Live is running, your Discord status shows your tier, rank, Elo and your last 48 hours. Discord just has to be open on the same PC; there's no login.
+- **Profile widget:** for people who already have a Discord app with a profile widget (Discord no longer gives widgets to new apps). On the **Discord widget** tab, enter the app's Application ID and paste its bot token. x76tracker reads the widget's layout and fills each field set to *User Data* with a stat you pick (current numbers or the last 48 hours), at most every 5 minutes. In a *Collection* layout each item becomes a card with a picture: your x76 rank emblem, or an emoji that follows your results. In a *Progress* layout, the bar shows how far you are through your tier. The token is stored encrypted for your Windows account (`discord-token.bin`) and only sent to Discord.
+
+![Settings, General tab: Rich Presence, whose numbers Discord shows, and the R5Reloaded opponents switch](docs/images/settings-general-dark.png)
+
+| The Discord widget tab | What it fills in on Discord |
+|---|---|
+| ![Settings, Discord widget tab: the widget's two fields (Objective and Progress), what fills each, and a preview of the values](docs/images/settings-widget-dark.png) | ![A Discord profile widget: Diamond III #348, 48h: 321-244 · +2,061 pts · up from Plat I, and a progress bar at 433/1000](docs/images/discord-widget.png) |
 
 ## Options
 
 ```
 x76tracker.exe --data-dir D:\x76            keep history somewhere else
 x76tracker.exe --screenshot out.png [--size 1440x1000] [--light|--dark] [--hover x,y] [--click x,y] [--offline]
-               [--tab servers] [--settings general|widget]
+               [--tab servers] [--settings general|widget|updates] [--preview-update 2.3.0]
                                             draw the window into a PNG without showing it
+                                            (--preview-update pretends that version is on GitHub)
+x76tracker.exe --screenshot out.png [--whats-new N] [--detail | --detail-upset]
+               [--record FRAMES [--fps 20] [--crop x,y,w,h] [--click-at F] [--hover-at F]]
+                                            open What's new or a result; --record writes an animated PNG
+x76tracker.exe --card out.png              the share card alone, as a 1280×672 PNG
 ```
+
+The `--screenshot` options exist only in builds made with `cargo build --release --features docs`; release builds leave them out. They draw x76tracker's own window into an image in memory (no screen capture). `docs\screenshots.ps1` renders the standard screenshots in `docs/images` this way; add `--scale 2` for double resolution.
+
+## Updates
+
+x76tracker checks GitHub for a new version when it starts and every 6 hours. A new version downloads in the background, is checked against the SHA-256 published with its release, and is installed when you close the app. **Settings → Updates** turns either part off and installs right away. **What's new** shows every version's changes with pictures, sorted into new, improved and fixed ([CHANGELOG.md](CHANGELOG.md)); it opens by itself after an update. A copy built from source (run from cargo's `target` folder) never replaces itself.
+
+| Settings → Updates | What's new |
+|---|---|
+| ![Settings, Updates tab: the installed version, the two update switches, and a button to the changelog](docs/images/settings-updates-dark.png) | ![The What's new menu: versions to pick from, a picture, and the version's changes](docs/changelog/2.2.2-whats-new@2x.png) |
 
 ## Verify your download
 
@@ -74,6 +104,9 @@ This produces `target\release\x76tracker.exe`.
 | `src/servers.rs` | x76's server list and the player-count history for the Servers tab. |
 | `src/discord.rs` | Discord settings, the profile widget's layout and updates, the encrypted bot token. |
 | `src/rpc.rs` | Rich Presence through Discord's local pipe, and spotting when a game is running. |
+| `src/update.rs` | Update check, download, SHA-256 check and swap; the in-app changelog. |
+| `CHANGELOG.md` | What changed in each version. Built into the app and used as the release notes. |
+| `docs/screenshots.ps1` | Renders the README's screenshots from your own data. |
 | `ui/app.slint` | The UI, styled after x76.gg: Archivo and IBM Plex Mono, paper/ink colours, tier colours. |
 
 The app draws its window with Slint's software renderer. Slint's GPU renderer placed some letters a pixel off the line.

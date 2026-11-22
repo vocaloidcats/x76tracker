@@ -37,13 +37,24 @@ jobs:
           rustup default $env:RUST_VERSION
           rustc --version
 
-      - name: Tag matches Cargo.toml version
+      - name: Tag matches Cargo.toml, and CHANGELOG.md has its notes
         if: github.ref_type == 'tag'
         env:
           TAG: ${{ github.ref_name }}
         run: |
           $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
           if ("v$v" -ne $env:TAG) { throw "Tag $env:TAG doesn't match the version in Cargo.toml ($v)." }
+          # the "## <version>" section of CHANGELOG.md becomes the release notes (the app shows the same text)
+          $lines = @(Get-Content CHANGELOG.md -Encoding utf8)
+          $start = -1
+          for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match "^## v?$([regex]::Escape($v))\s*$") { $start = $i; break } }
+          if ($start -lt 0) { throw "CHANGELOG.md has no '## $v' section. Add one before tagging." }
+          $notes = @()
+          for ($i = $start + 1; $i -lt $lines.Count -and $lines[$i] -notmatch '^## '; $i++) { $notes += $lines[$i] }
+          $text = ($notes -join "`n").Trim()
+          # pictures are paths in the repository; release notes need full addresses (at this tag)
+          $text = $text -replace '\]\((?!https?://)([^)\s]+)\)', ('](https://raw.githubusercontent.com/vocaloidcats/x76tracker/' + $env:TAG + '/$1)')
+          $text | Out-File -Encoding utf8 release-notes.md
 
       - name: Build
         run: cargo build --release --locked
@@ -77,4 +88,4 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           gh release create $env:TAG target/release/x76tracker.exe target/release/x76tracker.exe.sha256 `
-            --title "x76tracker $env:TAG" --generate-notes --verify-tag
+            --title "x76tracker $env:TAG" --notes-file release-notes.md --verify-tag

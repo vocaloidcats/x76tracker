@@ -4,7 +4,10 @@
 //!   x76tracker.exe                            normal start
 //!   x76tracker.exe --data-dir D:\x76          keep history somewhere else
 //!   x76tracker.exe --screenshot out.png [--size 1440x1000] [--light|--dark] [--hover x,y] [--offline]
-//!                  [--tab servers] [--settings general|widget]
+//!                  [--tab servers] [--settings general|widget|updates] [--preview-update 2.3.0]
+//!                  [--whats-new N] [--record FRAMES [--fps 20] [--crop x,y,w,h] [--click-at F] [--hover-at F]]
+//!                                             (--record writes an animated PNG)
+//!   x76tracker.exe --card out.png             the share card alone, as a PNG
 //!                                             render the window to a PNG without showing it
 #![windows_subsystem = "windows"]
 
@@ -18,6 +21,7 @@ mod ranks;
 mod rpc;
 mod servers;
 mod tracker;
+mod update;
 mod view;
 
 use serde_json::Value;
@@ -37,6 +41,97 @@ thread_local! {
     static PICS: RefCell<(bool, bool)> = const { RefCell::new((false, false)) };
     // what the Discord settings page was last built from (see set_discord_page)
     static DISCORD_SIG: RefCell<String> = const { RefCell::new(String::new()) };
+    // What's new pictures, decoded (cleared when the menu closes)
+    static MEDIA: RefCell<std::collections::HashMap<String, MediaSlot>> = RefCell::new(std::collections::HashMap::new());
+}
+
+enum MediaSlot {
+    Loading,
+    Ready { frames: Vec<slint::Image>, frame_ms: i32, aspect: f32, natural: f32 },
+    Failed,
+}
+
+/// What the menu shows for a picture right now.
+fn media_view(m: &update::Media) -> ChangeMedia {
+    let alt: slint::SharedString = m.alt.as_str().into();
+    MEDIA.with(|map| match map.borrow().get(&m.src) {
+        Some(MediaSlot::Ready { frames, frame_ms, aspect, natural }) => ChangeMedia {
+            has: true,
+            ready: true,
+            failed: false,
+            alt,
+            frames: slint::ModelRc::new(slint::VecModel::from(frames.clone())),
+            frame_ms: *frame_ms,
+            aspect: *aspect,
+            natural: *natural,
+        },
+        Some(MediaSlot::Failed) => ChangeMedia { has: true, failed: true, alt, ..Default::default() },
+        _ => ChangeMedia { has: true, alt, ..Default::default() },
+    })
+}
+
+fn store_media(src: &str, result: Result<update::Frames, String>) {
+    let slot = match result {
+        Ok(f) => {
+            let images: Vec<slint::Image> =
+                f.frames.iter().map(|px| slint::Image::from_rgba8(slint::SharedPixelBuffer::clone_from_slice(px, f.width, f.height))).collect();
+            // "…@2x.png" has two pixels per point: shown at half its pixel size, so it stays sharp
+            let density = if src.contains("@2x") { 2.0 } else { 1.0 };
+            MediaSlot::Ready {
+                frames: f.order.iter().map(|&i| images[i].clone()).collect(),
+                frame_ms: f.frame_ms as i32,
+                aspect: if f.width > 0 { f.height as f32 / f.width as f32 } else { 0.5 },
+                natural: f.width as f32 / density,
+            }
+        }
+        Err(_) => MediaSlot::Failed,
+    };
+    MEDIA.with(|m| m.borrow_mut().insert(src.to_string(), slot));
+}
+
+/// Loads every picture the What's new menu shows: in the background, or right away (`wait`).
+fn load_changelog_media(app: &AppWindow, shared: &Arc<Shared>, wait: bool) {
+    let (list, cache) = {
+        let core = shared.lock();
+        let mut list: Vec<update::Media> = Vec::new();
+        if let Some(r) = core.updater.newer() {
+            for e in update::parse_changelog(&r.notes, &r.version).into_iter().take(1) {
+                list.extend(e.media().cloned());
+            }
+        }
+        for e in update::parse_changelog(update::CHANGELOG, "") {
+            list.extend(e.media().cloned());
+        }
+        (list, core.data_file.with_file_name("changelog"))
+    };
+    for m in list {
+        let fresh = MEDIA.with(|map| {
+            let mut map = map.borrow_mut();
+            if map.contains_key(&m.src) {
+                return false;
+            }
+            map.insert(m.src.clone(), MediaSlot::Loading);
+            true
+        });
+        if !fresh {
+            continue;
+        }
+        let (src, cache) = (m.src.clone(), cache.clone());
+        let decode = move || update::media_bytes(&src, &cache).and_then(|b| update::decode_media(&b));
+        if wait {
+            store_media(&m.src, decode());
+        } else {
+            let (weak, s, src) = (app.as_weak(), shared.clone(), m.src.clone());
+            std::thread::spawn(move || {
+                let result = decode();
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    store_media(&src, result);
+                    refresh(&app, &s);
+                });
+            });
+        }
+    }
+    refresh(app, shared);
 }
 
 type Pixels = Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>>;
@@ -146,8 +241,11 @@ fn refresh(app: &AppWindow, shared: &Shared) {
         ui.flash.clear();
     });
     app.set_servers(view::servers_page(&core));
+    app.set_updates(view::updates_page(&core));
+    app.set_changelog(slint::ModelRc::new(slint::VecModel::from(view::changelog(&core, &media_view))));
     let (has_avatar, has_banner) = PICS.with(|p| *p.borrow());
     app.set_profile(view::profile_card(&core, has_avatar, has_banner));
+    app.set_share(view::share_card(&core, has_avatar, has_banner));
     let open_detail = UI.with(|ui| ui.borrow().detail.clone());
     app.set_detail(open_detail.and_then(|(key, id)| view::event_detail(&core, &key, &id)).unwrap_or_default());
     app.set_period(period.index());
@@ -219,6 +317,32 @@ fn tick(app: &AppWindow, shared: &Shared) {
     let (t, st) = view::patch_status(&core);
     app.set_patch_status(t.into());
     app.set_patch_state(st);
+    let (t, st) = view::update_status(&core);
+    app.set_update_status(t.into());
+    app.set_update_state(st);
+    app.set_card_busy(core.share_busy);
+    app.set_card_saved(core.share_saved.is_some());
+    let (err, note) = core.share_note.clone().unwrap_or_default();
+    app.set_card_status(note.into());
+    app.set_card_status_error(err);
+}
+
+/// Where share cards are saved: Pictures\x76tracker (or next to the history if there's no Pictures).
+fn cards_dir(data_dir: &Path) -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(|h| PathBuf::from(h).join("Pictures"))
+        .filter(|p| p.is_dir())
+        .map(|p| p.join("x76tracker"))
+        .unwrap_or_else(|| data_dir.join("cards"))
+}
+
+/// Opens Explorer with the file selected.
+fn reveal(file: &Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("explorer").raw_arg(format!("/select,\"{}\"", file.display())).spawn();
+    }
 }
 
 fn set_results(app: &AppWindow, game: Game, hits: &[Hit], msg: &str) {
@@ -730,8 +854,147 @@ fn wire(app: &AppWindow, shared: &Arc<Shared>) {
             }
         }
     });
+    actions.on_card_opened({
+        let (w, s) = ctx!();
+        move || {
+            if s.lock().share_busy {
+                // keep showing the save in progress
+            } else {
+                s.lock().share_note = None;
+            }
+            if let Some(app) = w.upgrade() {
+                app.set_card_open(true);
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_card_save({
+        let (w, s) = ctx!();
+        move || {
+            let (data_dir, name) = {
+                let mut core = s.lock();
+                if core.share_busy {
+                    return;
+                }
+                core.share_busy = true;
+                core.share_note = None;
+                let name = core
+                    .profile
+                    .as_ref()
+                    .map(|p| p.handle.clone())
+                    .or_else(|| core.state.favorites.first().map(|f| f.name.clone()))
+                    .unwrap_or_else(|| "card".into());
+                (core.data_file.parent().map(Path::to_path_buf).unwrap_or_default(), name)
+            };
+            if let Some(app) = w.upgrade() {
+                tick(&app, &s);
+            }
+            let (w, s) = (w.clone(), s.clone());
+            std::thread::spawn(move || {
+                // drawn by this same exe in its offscreen mode, at twice the size for a crisp image
+                let safe: String = name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+                let file = cards_dir(&data_dir).join(format!("x76tracker-{safe}-{}.png", chrono::Local::now().format("%Y-%m-%d-%H%M")));
+                let result = std::fs::create_dir_all(file.parent().unwrap_or(&data_dir))
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| std::env::current_exe().map_err(|e| e.to_string()))
+                    .and_then(|exe| {
+                        std::process::Command::new(exe)
+                            .arg("--data-dir")
+                            .arg(&data_dir)
+                            .arg("--card")
+                            .arg(&file)
+                            .status()
+                            .map_err(|e| e.to_string())
+                    })
+                    .and_then(|st| if st.success() && file.is_file() { Ok(()) } else { Err("the card couldn't be drawn".to_string()) });
+                {
+                    let mut core = s.lock();
+                    core.share_busy = false;
+                    match result {
+                        Ok(()) => {
+                            core.share_note = Some((false, format!("Saved to {}", file.display())));
+                            core.share_saved = Some(file.clone());
+                        }
+                        Err(e) => core.share_note = Some((true, format!("Couldn't save the card: {e}"))),
+                    }
+                }
+                if file.is_file() {
+                    reveal(&file);
+                }
+                let _ = w.upgrade_in_event_loop(move |app| tick(&app, &s));
+            });
+        }
+    });
+    actions.on_changelog_opened({
+        let (w, s) = ctx!();
+        move || {
+            if let Some(app) = w.upgrade() {
+                load_changelog_media(&app, &s, false);
+            }
+        }
+    });
+    actions.on_changelog_closed({
+        let (w, s) = ctx!();
+        move || {
+            MEDIA.with(|m| m.borrow_mut().clear()); // decoded animations take memory
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_card_reveal({
+        let (_, s) = ctx!();
+        move || {
+            if let Some(f) = s.lock().share_saved.clone() {
+                reveal(&f);
+            }
+        }
+    });
+    actions.on_update_check({
+        let (w, s) = ctx!();
+        move || {
+            let (w, s) = (w.clone(), s.clone());
+            std::thread::spawn(move || {
+                update::check(&s);
+                let _ = w.upgrade_in_event_loop(move |app| refresh(&app, &s));
+            });
+        }
+    });
+    actions.on_update_install({
+        let (w, s) = ctx!();
+        move || {
+            let (w, s) = (w.clone(), s.clone());
+            std::thread::spawn(move || {
+                let notify = {
+                    let (w, s) = (w.clone(), s.clone());
+                    move || {
+                        let s = s.clone();
+                        let _ = w.upgrade_in_event_loop(move |app| refresh(&app, &s));
+                    }
+                };
+                if update::fetch_update(&s, &notify) {
+                    // the swap happens after the window closes (see finish_update)
+                    update::RESTART.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let _ = w.upgrade_in_event_loop(|app| {
+                        let _ = app.window().hide();
+                        let _ = slint::quit_event_loop();
+                    });
+                }
+            });
+        }
+    });
+    actions.on_update_setting({
+        let (w, s) = ctx!();
+        move |which, on| {
+            let key = if which == "check" { "updateCheck" } else { "updateAuto" };
+            s.lock().set_setting(key, on.into());
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
     actions.on_open_url(|url| {
-        if url.starts_with("https://discord.com/") {
+        if url.starts_with("https://discord.com/") || url.starts_with("https://github.com/vocaloidcats/x76tracker") {
             let _ = std::process::Command::new("explorer").arg(url.as_str()).spawn();
         }
     });
@@ -923,6 +1186,53 @@ mod screenshot {
         fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
             Ok(self.0.clone())
         }
+        // animations run on this clock, so frames come out evenly spaced however long they take to draw
+        fn duration_since_start(&self) -> Duration {
+            Duration::from_millis(CLOCK_MS.load(std::sync::atomic::Ordering::Relaxed))
+        }
+    }
+
+    static CLOCK_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn advance(ms: u64) {
+        CLOCK_MS.fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
+        slint::platform::update_timers_and_animations();
+    }
+
+    /// An animated PNG of the window (or part of it), frame by frame.
+    pub struct Record {
+        pub frames: u32,
+        pub fps: u32,
+        /// x, y, width, height in window pixels
+        pub crop: Option<(u32, u32, u32, u32)>,
+        /// frame at which the --click / --hover happens (otherwise before recording starts)
+        pub click_at: Option<u32>,
+        pub hover_at: Option<u32>,
+    }
+
+    fn click(app: &AppWindow, (x, y): (f32, f32)) {
+        let position = slint::LogicalPosition::new(x, y);
+        let button = slint::platform::PointerEventButton::Left;
+        app.window().dispatch_event(WindowEvent::PointerMoved { position });
+        app.window().dispatch_event(WindowEvent::PointerPressed { position, button });
+        app.window().dispatch_event(WindowEvent::PointerReleased { position, button });
+    }
+
+    fn hover(app: &AppWindow, (x, y): (f32, f32)) {
+        app.window().dispatch_event(WindowEvent::PointerMoved { position: slint::LogicalPosition::new(x, y) });
+    }
+
+    /// Straight (not premultiplied) RGBA of a region of the frame.
+    fn region(buf: &[PremultipliedRgbaColor], stride: u32, (x0, y0, cw, ch): (u32, u32, u32, u32)) -> Vec<u8> {
+        let mut out = Vec::with_capacity((cw * ch * 4) as usize);
+        for y in y0..y0 + ch {
+            for p in &buf[(y * stride + x0) as usize..(y * stride + x0 + cw) as usize] {
+                let a = p.alpha as u32;
+                let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a / 2) / a).min(255) as u8 };
+                out.extend_from_slice(&[un(p.red), un(p.green), un(p.blue), p.alpha]);
+            }
+        }
+        out
     }
 
     pub struct Options {
@@ -931,28 +1241,59 @@ mod screenshot {
         pub theme: Option<bool>,
         pub hover: Option<(f32, f32)>,
         pub offline: bool,
-        /// open the detail panel on the newest R5 result that has fights in it
+        /// open the detail panel on the newest R5 result that has fights in it (or an upset win)
         pub detail: bool,
+        pub detail_upset: bool,
         /// show the Servers tab
         pub servers_tab: bool,
         /// open Settings on this tab (0 general, 1 Discord widget)
         pub settings: Option<i32>,
         /// click here before the final frame (e.g. to open a dropdown)
         pub click: Option<(f32, f32)>,
+        /// pretend this version is the latest release, to see the update screens
+        pub preview_update: Option<String>,
+        /// draw only the share card (at 2x), for the PNG export
+        pub card: bool,
+        /// open What's new on this entry (its pictures are loaded first)
+        pub whats_new: Option<i32>,
+        /// write an animated PNG instead of a still
+        pub record: Option<Record>,
+        /// pixels per point (2 = twice the resolution; size, clicks and crops stay in points)
+        pub scale: f32,
     }
 
     pub fn run(data_file: PathBuf, o: Options) -> Result<(), Box<dyn std::error::Error>> {
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        // X76_PARTIAL=1 redraws only what changed, like a real window does (for checking that)
+        let repaint = if std::env::var_os("X76_PARTIAL").is_some() { RepaintBufferType::ReusedBuffer } else { RepaintBufferType::NewBuffer };
+        let window = MinimalSoftwareWindow::new(repaint);
         slint::platform::set_platform(Box::new(Offscreen(window.clone()))).map_err(|e| format!("{e:?}"))?;
         let shared = Shared::new(data_file);
         if !o.offline {
             shared.poll_once(&|_| {});
             shared.poll_servers();
+            update::check(&shared);
+        }
+        if let Some(v) = &o.preview_update {
+            update::PREVIEW.store(true, std::sync::atomic::Ordering::Relaxed);
+            let mut core = shared.lock();
+            core.updater.latest = Some(update::preview_release(v));
+            core.updater.checked_at = Some(now());
+            core.updater.error = None;
         }
         shared.scan_r5(&mut r5log::Tail::default());
         shared.check_r5_patch(false);
         let saved_handle = shared.lock().setting_str("x76Handle");
-        let pics = saved_handle.and_then(|h| fetch_profile(&shared, &h).ok());
+        let pics = if o.card {
+            // the card only needs the profile and its pictures, not fresh ladders
+            saved_handle.and_then(|h| profile::fetch(&h).ok()).map(|p| {
+                let avatar = p.avatar_url.as_deref().and_then(|u| profile::picture(u, 256, true));
+                let banner = p.banner_url.as_deref().and_then(|u| profile::picture(u, 1600, false));
+                shared.lock().profile = Some(p);
+                (avatar, banner)
+            })
+        } else {
+            saved_handle.and_then(|h| fetch_profile(&shared, &h).ok())
+        };
         let app = AppWindow::new()?;
         wire(&app, &shared);
         startup(&app, &shared);
@@ -964,12 +1305,24 @@ mod screenshot {
             app.set_settings_open(true);
             app.set_settings_tab(t);
         }
-        if o.detail {
+        if o.card {
+            app.set_card_mode(true);
+        }
+        let scale = o.scale.clamp(0.5, 4.0);
+        if scale != 1.0 {
+            app.window().dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+        }
+        if o.detail || o.detail_upset {
             let core = shared.lock();
             if let Some(f) = core.state.favorites.iter().find(|f| f.game == "r5") {
                 let key = tracker::key_of("r5", &f.id);
                 if let Some(h) = core.state.history.get(&key) {
-                    let has_fights = |i: usize| core.fights.iter().any(|x| x.t > h[i - 1].t && x.t <= h[i].t);
+                    let upset_win = |x: &r5log::Fight| {
+                        x.kind == "kill" && x.opp_elo.zip(x.my_elo).is_some_and(|(o, m)| 1.0 / (1.0 + 10f64.powf((o - m) / 400.0)) < 0.35)
+                    };
+                    let has_fights = |i: usize| {
+                        core.fights.iter().any(|x| x.t > h[i - 1].t && x.t <= h[i].t && (!o.detail_upset || upset_win(x)))
+                    };
                     if let Some(i) = (1..h.len()).rev().find(|&i| has_fights(i)) {
                         UI.with(|ui| ui.borrow_mut().detail = Some((key.clone(), view::row_id(h[i].t))));
                     }
@@ -982,36 +1335,112 @@ mod screenshot {
         let cache = shared.lock().data_file.with_file_name("ranks");
         show_rank_icons(&app, ranks::load(&cache));
         refresh(&app, &shared);
-        let (w, h) = o.size;
+        if let Some(i) = o.whats_new {
+            load_changelog_media(&app, &shared, true);
+            app.set_changelog_index(i);
+            app.set_changelog_open(true);
+        }
+        let (w, h) = ((o.size.0 as f32 * scale).round() as u32, (o.size.1 as f32 * scale).round() as u32);
         window.set_size(slint::PhysicalSize::new(w, h));
         app.show()?;
+        let rec = o.record.as_ref();
         let mut buf = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
+        // a few passes to let layouts, pictures and opening animations settle
         for pass in 0..3 {
-            if pass == 1 {
-                if let Some((x, y)) = o.click {
-                    let position = slint::LogicalPosition::new(x, y);
-                    let button = slint::platform::PointerEventButton::Left;
-                    app.window().dispatch_event(WindowEvent::PointerMoved { position });
-                    app.window().dispatch_event(WindowEvent::PointerPressed { position, button });
-                    app.window().dispatch_event(WindowEvent::PointerReleased { position, button });
+            if pass == 1 && rec.map_or(true, |r| r.click_at.is_none()) {
+                if let Some(at) = o.click {
+                    click(&app, at);
                 }
             }
-            if pass == 2 {
-                if let Some((x, y)) = o.hover {
-                    app.window().dispatch_event(WindowEvent::PointerMoved { position: slint::LogicalPosition::new(x, y) });
+            if pass == 2 && rec.map_or(true, |r| r.hover_at.is_none()) {
+                if let Some(at) = o.hover {
+                    hover(&app, at);
                 }
             }
+            advance(700);
             window.request_redraw();
             window.draw_if_needed(|r| {
                 r.render(&mut buf, w as usize);
             });
         }
-        let mut rgba = Vec::with_capacity(buf.len() * 4);
-        for p in &buf {
-            let a = p.alpha as u32;
-            let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a / 2) / a).min(255) as u8 };
-            rgba.extend_from_slice(&[un(p.red), un(p.green), un(p.blue), p.alpha]);
+        if let Some(r) = rec {
+            let step = (1000 / r.fps.clamp(1, 60)) as u64;
+            let px = |v: u32| (v as f32 * scale).round() as u32;
+            let (cx, cy, cw, ch) = r.crop.map(|(x, y, cw, ch)| (px(x), px(y), px(cw), px(ch))).unwrap_or((0, 0, w, h));
+            let crop = (cx.min(w - 1), cy.min(h - 1), cw.min(w - cx.min(w - 1)), ch.min(h - cy.min(h - 1)));
+            let mut frames = Vec::with_capacity(r.frames as usize);
+            for i in 0..r.frames {
+                if r.click_at == Some(i) {
+                    if let Some(at) = o.click {
+                        click(&app, at);
+                    }
+                }
+                if r.hover_at == Some(i) {
+                    if let Some(at) = o.hover {
+                        hover(&app, at);
+                    }
+                }
+                advance(step);
+                window.request_redraw();
+                window.draw_if_needed(|rd| {
+                    rd.render(&mut buf, w as usize);
+                });
+                frames.push(region(&buf, w, crop));
+            }
+            // identical frames in a row become one frame shown longer (a still moment costs nothing)
+            let mut runs: Vec<(Vec<u8>, u32)> = Vec::new();
+            for f in frames {
+                match runs.last_mut() {
+                    Some((last, n)) if *last == f => *n += 1,
+                    _ => runs.push((f, 1)),
+                }
+            }
+            let file = std::io::BufWriter::new(std::fs::File::create(&o.out)?);
+            let mut enc = png::Encoder::new(file, crop.2, crop.3);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.set_animated(runs.len() as u32, 0)?; // loop forever
+            let mut writer = enc.write_header()?;
+            // after the first frame, store only the rectangle that changed (drawn over the last frame)
+            let (fw, fh) = (crop.2, crop.3);
+            let mut prev: Option<&Vec<u8>> = None;
+            for (f, n) in &runs {
+                writer.set_frame_delay((step as u32 * n).min(u16::MAX as u32) as u16, 1000)?;
+                let Some(p) = prev else {
+                    writer.write_image_data(f)?;
+                    prev = Some(f);
+                    continue;
+                };
+                let (mut x0, mut y0, mut x1, mut y1) = (fw, fh, 0, 0);
+                for y in 0..fh {
+                    for x in 0..fw {
+                        let i = ((y * fw + x) * 4) as usize;
+                        if f[i..i + 4] != p[i..i + 4] {
+                            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                        }
+                    }
+                }
+                if x1 < x0 || y1 < y0 {
+                    (x0, y0, x1, y1) = (0, 0, 0, 0);
+                }
+                let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
+                let mut sub = Vec::with_capacity((w * h * 4) as usize);
+                for y in y0..=y1 {
+                    let start = ((y * fw + x0) * 4) as usize;
+                    sub.extend_from_slice(&f[start..start + (w * 4) as usize]);
+                }
+                writer.reset_frame_position()?;
+                writer.set_frame_dimension(w, h)?;
+                writer.set_frame_position(x0, y0)?;
+                writer.set_blend_op(png::BlendOp::Source)?;
+                writer.set_dispose_op(png::DisposeOp::None)?;
+                writer.write_image_data(&sub)?;
+                prev = Some(f);
+            }
+            writer.finish()?;
+            return Ok(());
         }
+        let rgba = region(&buf, w, (0, 0, w, h));
         let file = std::io::BufWriter::new(std::fs::File::create(&o.out)?);
         let mut enc = png::Encoder::new(file, w, h);
         enc.set_color(png::ColorType::Rgba);
@@ -1026,6 +1455,7 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
 }
 
+#[cfg(feature = "docs")]
 fn pair<T: std::str::FromStr>(v: &str, sep: char) -> Option<(T, T)> {
     let (a, b) = v.split_once(sep)?;
     Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
@@ -1035,6 +1465,7 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = arg_value(&args, "--data-dir").map(PathBuf::from).unwrap_or_else(default_data_dir);
     let data_file = data_dir.join("state.json");
 
+    #[cfg(feature = "docs")]
     if let Some(out) = arg_value(&args, "--screenshot") {
         let theme = if args.iter().any(|a| a == "--light") { Some(false) } else if args.iter().any(|a| a == "--dark") { Some(true) } else { None };
         return screenshot::run(
@@ -1046,15 +1477,57 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 hover: arg_value(&args, "--hover").and_then(|v| pair(&v, ',')),
                 offline: args.iter().any(|a| a == "--offline"),
                 detail: args.iter().any(|a| a == "--detail"),
+                detail_upset: args.iter().any(|a| a == "--detail-upset"),
                 servers_tab: arg_value(&args, "--tab").as_deref() == Some("servers"),
-                settings: arg_value(&args, "--settings").map(|v| if v == "widget" { 1 } else { 0 }),
+                settings: arg_value(&args, "--settings").map(|v| match v.as_str() {
+                    "widget" => 1,
+                    "updates" => 2,
+                    _ => 0,
+                }),
                 click: arg_value(&args, "--click").and_then(|v| pair(&v, ',')),
+                preview_update: arg_value(&args, "--preview-update"),
+                card: false,
+                whats_new: arg_value(&args, "--whats-new").and_then(|v| v.parse().ok()),
+                record: arg_value(&args, "--record").and_then(|v| v.parse().ok()).map(|frames| screenshot::Record {
+                    frames,
+                    fps: arg_value(&args, "--fps").and_then(|v| v.parse().ok()).unwrap_or(20),
+                    crop: arg_value(&args, "--crop").and_then(|v| {
+                        let n: Vec<u32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                        (n.len() == 4).then(|| (n[0], n[1], n[2], n[3]))
+                    }),
+                    click_at: arg_value(&args, "--click-at").and_then(|v| v.parse().ok()),
+                    hover_at: arg_value(&args, "--hover-at").and_then(|v| v.parse().ok()),
+                }),
+                scale: arg_value(&args, "--scale").and_then(|v| v.parse().ok()).unwrap_or(1.0),
+            },
+        );
+    }
+    // the share card alone, as a PNG (Save PNG runs this; it reads the saved history, no checks)
+    if let Some(out) = arg_value(&args, "--card") {
+        return screenshot::run(
+            data_file,
+            screenshot::Options {
+                out,
+                size: (640, 336),
+                theme: Some(true),
+                hover: None,
+                offline: true,
+                detail: false,
+                detail_upset: false,
+                servers_tab: false,
+                settings: None,
+                click: None,
+                preview_update: None,
+                card: true,
+                whats_new: None,
+                record: None,
+                scale: 2.0,
             },
         );
     }
 
     // one copy per history folder: a second launch hands off to the first right away
-    let _lock = match single_instance(&data_dir) {
+    let lock = match single_instance(&data_dir) {
         Lock::Busy => {
             win::focus_existing();
             return Ok(());
@@ -1077,11 +1550,22 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         })
         .select()?;
 
+    update::clean_up(&data_dir.join("update")); // the old exe and downloads from the last update
     let shared = Shared::new(data_file);
     let app = AppWindow::new()?;
     wire(&app, &shared);
     wire_window(&app);
     startup(&app, &shared);
+    // first start of a new version: show what's new
+    let last = shared.lock().setting_str("lastVersion");
+    if last.as_deref() != Some(VERSION) {
+        shared.lock().set_setting("lastVersion", VERSION.into());
+        if last.as_deref().is_some_and(|l| update::is_newer(VERSION, l)) {
+            app.set_changelog_index(0);
+            app.set_changelog_open(true);
+            load_changelog_media(&app, &shared, false);
+        }
+    }
     refresh(&app, &shared);
     let saved_handle = shared.lock().setting_str("x76Handle");
     if let Some(h) = saved_handle {
@@ -1159,6 +1643,33 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // updates: check GitHub now and then; with automatic install on, download in the background
+    let (up_shared, up_weak) = (shared.clone(), app.as_weak());
+    std::thread::spawn(move || {
+        let notify = {
+            let (s, w) = (up_shared.clone(), up_weak.clone());
+            move || {
+                let s = s.clone();
+                let _ = w.upgrade_in_event_loop(move |app| refresh(&app, &s));
+            }
+        };
+        std::thread::sleep(Duration::from_secs(10));
+        loop {
+            let (due, fetch) = {
+                let core = up_shared.lock();
+                let due = update::auto_check(&core) && core.updater.checked_at.map_or(true, |t| now() - t >= update::CHECK_EVERY);
+                (due, update::auto_install(&core) && !update::dev_build() && core.updater.auto_download_allowed())
+            };
+            if due && update::check(&up_shared) {
+                notify();
+            }
+            if fetch {
+                update::fetch_update(&up_shared, &notify);
+            }
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    });
+
     let ticker = slint::Timer::default();
     let (w, s) = (app.as_weak(), shared.clone());
     let mut seconds = 0u32;
@@ -1171,7 +1682,32 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     app.run()?;
+    finish_update(&shared, lock);
     Ok(())
+}
+
+/// After the window closes: swap in a downloaded update (automatic install, or "Install and
+/// restart", which also starts the new version).
+fn finish_update(shared: &Shared, lock: Lock) {
+    let restart = update::RESTART.load(std::sync::atomic::Ordering::SeqCst);
+    let staged = {
+        let core = shared.lock();
+        let auto = update::auto_install(&core);
+        core.updater.staged.clone().filter(|(v, p)| p.is_file() && update::is_newer(v, VERSION) && (restart || auto))
+    };
+    let (Some((_, path)), Ok(exe)) = (staged, std::env::current_exe()) else { return };
+    if update::dev_build() {
+        return;
+    }
+    drop(lock); // let the new version start
+    match update::swap_at(&exe, &path) {
+        Ok(()) if restart => {
+            let _ = std::process::Command::new(&exe).spawn();
+        }
+        Ok(()) => {}
+        Err(e) if restart => win::message(&format!("The update couldn't be installed:\n\n{e}")),
+        Err(_) => {}
+    }
 }
 
 fn main() {
