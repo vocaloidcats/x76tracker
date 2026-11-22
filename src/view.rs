@@ -4,7 +4,7 @@ use crate::tracker::{key_of, now, Core, Favorite, Game, Hit, Player, Snap};
 use crate::{
     ChangeEntry, ChangeItem, ChangeMedia, ChangeSection, ShareCard, ShareGame, UpdatesPage,
     ChartData, ChartPoint, DiscordPage, EventDetail, EventRow, FightDetail, GameData, GameRank, Opponent, PlayerCard, ProfileCard, SearchResult,
-    RivalFight, RivalPage, RivalTile,
+    RecapLine, RecapPage, RivalFight, RivalPage, RivalTile,
     ServerGame, ServerRow, ServersPage, StatChange, StaticText, Tick, WidgetSlot,
 };
 use chrono::{DateTime, Local, TimeZone};
@@ -77,6 +77,8 @@ pub struct UiState {
     pub detail: Option<(String, String)>,
     /// The opponent whose head-to-head panel is open: (card key, opponent's name).
     pub rival: Option<(String, String)>,
+    /// The session whose recap is open (index into Core::sessions).
+    pub recap: Option<usize>,
     /// Row ids already on each card's board (new ones fade in) and the points/Elo last shown (they tick).
     pub seen: HashMap<String, HashSet<String>>,
     pub shown_nums: HashMap<String, (f64, f64)>,
@@ -539,6 +541,11 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
     let fight_acc: Vec<f64> = mine.iter().filter(|f| f.t >= start).filter_map(|f| f.my_acc).collect();
     let in_period: Vec<&crate::r5log::Fight> = mine.iter().copied().filter(|f| f.t >= start).collect();
     let (nemesis, victim) = rivals_of(&in_period);
+    let recap = if crate::discord::Config::load(core).player(core, game).as_deref() == Some(fav.id.as_str()) {
+        core.sessions.iter().rposition(|x| x.game == game.id()).map(|i| i as i32).unwrap_or(-1)
+    } else {
+        -1
+    };
     let show_elo = metric_is_elo(core, &key);
     let show_all = ui.show_all.contains(&key);
     let chart_data = chart(h, start, show_elo);
@@ -619,7 +626,141 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
         nemesis_rec: s(nemesis.as_ref().map(|r| format!("{}–{}", r.wins, r.losses)).unwrap_or_default()),
         victim: s(victim.as_ref().map(|r| r.name.as_str()).unwrap_or_default()),
         victim_rec: s(victim.as_ref().map(|r| format!("{}–{}", r.wins, r.losses)).unwrap_or_default()),
+        recap,
     }
+}
+
+// ------------------------------------------------------------------ session recap
+/// The recap of one game session, for the player picked as yours for that game: fights from the
+/// game log, Elo, points and rank from the ladder checks before and after (x76 books them a few
+/// minutes late, so the recap keeps filling in for a while).
+pub fn recap_page(core: &Core, idx: usize) -> Option<RecapPage> {
+    const LAG: f64 = 900.0;
+    let sess = core.sessions.get(idx)?;
+    let game = Game::from_id(&sess.game)?;
+    let id = crate::discord::Config::load(core).player(core, game)?;
+    let key = key_of(game.id(), &id);
+    let fav = core.state.favorites.iter().find(|f| f.game == game.id() && f.id == id)?;
+    let h: &[Snap] = core.state.history.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+    // the ladder after: bookings up to LAG after the end, but not into this game's next session
+    let next_start = core.sessions.iter().filter(|x| x.game == sess.game && x.start > sess.start).map(|x| x.start).fold(f64::INFINITY, f64::min);
+    let until = (sess.end + LAG).min(now()).min(next_start);
+    let before = h.iter().take_while(|x| x.t <= sess.start).last();
+    let after = h.iter().take_while(|x| x.t <= until).last().filter(|a| before.map_or(true, |b| a.t > b.t));
+    let fights: Vec<&crate::r5log::Fight> = fights_for(core, game, &id).into_iter().filter(|f| f.t >= sess.start && f.t <= sess.end + 5.0).collect();
+    let (wins, losses) = if !fights.is_empty() {
+        let w = fights.iter().filter(|f| f.kind == "kill").count() as i64;
+        (w, fights.len() as i64 - w)
+    } else {
+        before.zip(after).map(|(a, b)| ((b.kills - a.kills).max(0), (b.deaths - a.deaths).max(0))).unwrap_or((0, 0))
+    };
+
+    let mut tiles = Vec::new();
+    let signed = |v: f64, text: String| if v > 0.0 { format!("+{text}") } else if v < 0.0 { format!("−{text}") } else { text };
+    if let (Some(a), Some(b)) = (before.and_then(|x| x.points), after.and_then(|x| x.points)) {
+        let d = (b - a) as f64;
+        tiles.push(RivalTile {
+            label: s("POINTS"),
+            value: s(signed(d, format!("{}P", thousands((b - a).abs())))),
+            sub: s(format!("{}P → {}P", thousands(a), thousands(b))),
+            dir: d.signum() as i32,
+        });
+    }
+    if let (Some(a), Some(b)) = (before.and_then(|x| x.elo), after.and_then(|x| x.elo)) {
+        let d = b - a;
+        tiles.push(RivalTile {
+            label: s("ELO"),
+            value: s(signed(if d.abs() < 0.005 { 0.0 } else { d }, two_decimals(d.abs()))),
+            sub: s(format!("{} → {}", two_decimals(a), two_decimals(b))),
+            dir: if d.abs() < 0.005 { 0 } else { d.signum() as i32 },
+        });
+    }
+    if let (Some(a), Some(b)) = (before.and_then(|x| x.rank), after.and_then(|x| x.rank)) {
+        let up = a - b; // a lower number is better
+        tiles.push(RivalTile {
+            label: s("RANK"),
+            value: s(if up == 0 { "same".to_string() } else { format!("{}{}", if up > 0 { "+" } else { "−" }, thousands(up.abs())) }),
+            sub: s(format!("place{} · #{} → #{}", if up.abs() == 1 { "" } else { "s" }, thousands(a), thousands(b))),
+            dir: up.signum() as i32,
+        });
+    }
+    let accs: Vec<(f64, Option<f64>)> = fights.iter().filter_map(|f| f.my_acc.map(|m| (m, f.opp_acc))).collect();
+    if !accs.is_empty() {
+        let k = accs.len() as f64;
+        let mine = accs.iter().map(|a| a.0).sum::<f64>() / k;
+        let theirs: Vec<f64> = accs.iter().filter_map(|a| a.1).collect();
+        let sub = if theirs.is_empty() {
+            format!("{} fights", accs.len())
+        } else {
+            format!("opponents {} · {} fights", pct(theirs.iter().sum::<f64>() / theirs.len() as f64), accs.len())
+        };
+        tiles.push(RivalTile { label: s("ACCURACY"), value: s(pct(mine)), sub: s(sub), dir: 0 });
+    } else if wins + losses > 0 {
+        tiles.push(RivalTile {
+            label: s("WIN RATE"),
+            value: s(format!("{:.0}%", wins as f64 * 100.0 / (wins + losses) as f64)),
+            sub: s(format!("{wins} of {} fights", wins + losses)),
+            dir: 0,
+        });
+    }
+
+    let mut lines = Vec::new();
+    if let Some(best) = fights.iter().filter(|f| f.kind == "kill").filter(|f| f.opp_elo.is_some()).max_by(|a, b| a.opp_elo.unwrap().total_cmp(&b.opp_elo.unwrap())) {
+        lines.push(RecapLine {
+            label: s("Best win"),
+            name: s(best.opponent.as_str()),
+            value: s(format!("{} Elo{}", thousands(best.opp_elo.unwrap().round() as i64), best.opp_tier.as_deref().map(|t| format!(" · {t}")).unwrap_or_default())),
+            dir: 1,
+        });
+    }
+    let (nemesis, victim) = rivals_of(&fights);
+    if let Some(r) = nemesis {
+        lines.push(RecapLine { label: s("Nemesis"), name: s(r.name.as_str()), value: s(format!("{}–{}", r.wins, r.losses)), dir: -1 });
+    }
+    if let Some(r) = victim {
+        lines.push(RecapLine { label: s("Favourite victim"), name: s(r.name.as_str()), value: s(format!("{}–{}", r.wins, r.losses)), dir: 1 });
+    }
+    let upset = |f: &&crate::r5log::Fight| {
+        let won = f.kind == "kill";
+        f.my_elo.zip(f.opp_elo).map(|(m, o)| win_chance(m, o)).is_some_and(|c| (won && c < 0.35) || (!won && c > 0.65))
+    };
+    let (uw, ul) = (fights.iter().filter(|f| f.kind == "kill" && upset(f)).count(), fights.iter().filter(|f| f.kind != "kill" && upset(f)).count());
+    if uw + ul > 0 {
+        lines.push(RecapLine { label: s("Upsets"), name: s(""), value: s(format!("{uw} won · {ul} lost")), dir: 0 });
+    }
+    if let Some(top) = records(&fights).first().filter(|r| r.wins + r.losses >= 3) {
+        lines.push(RecapLine { label: s("Most fought"), name: s(top.name.as_str()), value: s(format!("{}–{}", top.wins, top.losses)), dir: (top.wins - top.losses).signum() as i32 });
+    }
+
+    let record = match (wins, losses) {
+        (0, 0) => "no fights recorded".to_string(),
+        (w, l) => format!("{w} win{} · {l} loss{}", if w == 1 { "" } else { "s" }, if l == 1 { "" } else { "es" }),
+    };
+    let (tier_from, tier_to) = (before.map(|x| x.tier.clone()).unwrap_or_default(), after.map(|x| x.tier.clone()).unwrap_or_default());
+    let note = if now() < sess.end + LAG {
+        "x76 books Elo and points a few minutes after the fights, so this recap fills in as they land.".to_string()
+    } else if fights.is_empty() {
+        format!("No fights from the game log in this session. Turn on {} opponents in Settings to see who you fought.", game.label())
+    } else {
+        "Fights are from the game log; Elo, points and rank from the ladder checks before and after the session.".to_string()
+    };
+    Some(RecapPage {
+        open: true,
+        index: idx as i32,
+        key: s(key.as_str()),
+        title: s(format!("{} · {}", game.label(), span(sess.end - sess.start))),
+        subtitle: s(format!("{} · {} → {}", fav.name, clock_day(sess.start), clock(sess.end))),
+        record: s(record),
+        lead: (wins - losses).signum() as i32,
+        tier_from: s(tier_from.as_str()),
+        tier_to: s(tier_to.as_str()),
+        tier_key: tier_key(&tier_to),
+        tiles: model(tiles),
+        lines: model(lines),
+        note: s(note),
+        has_prev: idx > 0,
+        has_next: idx + 1 < core.sessions.len(),
+    })
 }
 
 // ------------------------------------------------------------------ rivals
@@ -1369,6 +1510,7 @@ pub fn discord_page(core: &Core) -> DiscordPage {
         r5_patch: core.r5patch == Some(crate::r5patch::State::On),
         r5_found: r5_dir.is_some(),
         ql_log: core.qllog == Some(true),
+        recap_auto: core.state.settings.get("recapAuto").and_then(serde_json::Value::as_bool).unwrap_or(true),
         players_r5: model(r5_names.into_iter().map(s).collect()),
         player_r5: r5_i,
         players_ql: model(ql_names.into_iter().map(s).collect()),

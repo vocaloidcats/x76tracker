@@ -294,6 +294,30 @@ pub fn search(board: &Board, game: Game, query: &str, tracked: &HashSet<String>,
     (all, total)
 }
 
+// ------------------------------------------------------------------ game sessions
+/// One stretch of playing: from the game starting (or x76tracker noticing it) to it closing.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Session {
+    pub game: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+const MAX_SESSIONS: usize = 500;
+
+fn load_sessions(path: &std::path::Path) -> Vec<Session> {
+    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn save_sessions(path: &std::path::Path, sessions: &[Session]) {
+    if let Ok(body) = serde_json::to_vec(sessions) {
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, body).is_ok() {
+            let _ = std::fs::rename(tmp, path);
+        }
+    }
+}
+
 // ------------------------------------------------------------------ core state
 pub struct Core {
     pub state: SavedState,
@@ -334,6 +358,10 @@ pub struct Core {
     pub r5patch_note: Option<(bool, String)>,
     /// New versions on GitHub: the last check, the download, a verified copy ready to swap in.
     pub updater: crate::update::Live,
+    /// Game sessions so far (sessions.json), and the game running now with when it was noticed.
+    pub sessions: Vec<Session>,
+    pub sessions_file: PathBuf,
+    pub playing: Option<(Game, f64)>,
     /// Share card export: running, the last outcome (is an error, text), the last saved file.
     pub share_busy: bool,
     pub share_note: Option<(bool, String)>,
@@ -355,6 +383,8 @@ impl Shared {
         let fights = crate::r5log::load(&fights_file);
         let ql_fights_file = data_file.with_file_name("ql-fights.json");
         let ql_fights = crate::r5log::load(&ql_fights_file);
+        let sessions_file = data_file.with_file_name("sessions.json");
+        let sessions = load_sessions(&sessions_file);
         let server_file = data_file.with_file_name("servers.json");
         let server_history = crate::servers::load(&server_file);
         let token = data_file.parent().and_then(crate::discord::load_token);
@@ -374,6 +404,9 @@ impl Shared {
                 ql_fights_file,
                 qllog: None,
                 qllog_note: None,
+                sessions,
+                sessions_file,
+                playing: None,
                 profile: None,
                 profile_busy: false,
                 profile_error: None,
@@ -566,6 +599,35 @@ impl Shared {
             crate::r5log::save(&file, &mut core.ql_fights);
         }
         added || rated
+    }
+
+    /// Follows which game is running. When one closes after a real session (two minutes or more,
+    /// or any fights), the session is saved and its index returned, for the app to show its recap.
+    pub fn watch_game(&self, running: Option<Game>) -> Option<usize> {
+        let mut core = self.lock();
+        let t = now();
+        match core.playing {
+            None => {
+                core.playing = running.map(|g| (g, t));
+                None
+            }
+            Some((g, start)) if running != Some(g) => {
+                core.playing = running.map(|g2| (g2, t));
+                let fights = if g == Game::Ql { &core.ql_fights } else { &core.fights };
+                let had_fights = fights.iter().any(|f| f.t >= start && f.t <= t);
+                if t - start < 120.0 && !had_fights {
+                    return None;
+                }
+                core.sessions.push(Session { game: g.id().into(), start, end: t });
+                if core.sessions.len() > MAX_SESSIONS {
+                    let extra = core.sessions.len() - MAX_SESSIONS;
+                    core.sessions.drain(..extra);
+                }
+                save_sessions(&core.sessions_file, &core.sessions);
+                Some(core.sessions.len() - 1)
+            }
+            _ => None,
+        }
     }
 
     /// Reads whether autoexec.cfg turns Quake Live's console log on. Returns true if what the UI
@@ -835,5 +897,27 @@ fn load(path: &PathBuf) -> (SavedState, Option<String>) {
             let name = backup.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             (SavedState::default(), Some(format!("Couldn't read the saved history ({e}). It was moved to {name} and a fresh one started.")))
         }
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn sessions_start_and_end_with_the_game() {
+        let dir = std::env::temp_dir().join(format!("x76-sessions-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shared = Shared::new(dir.join("state.json"));
+        assert_eq!(shared.watch_game(Some(Game::Ql)), None); // the game starts
+        shared.lock().playing = Some((Game::Ql, now() - 300.0)); // ...five minutes ago
+        assert_eq!(shared.watch_game(Some(Game::Ql)), None); // still playing
+        assert_eq!(shared.watch_game(None), Some(0)); // it closes: a session
+        assert_eq!(load_sessions(&dir.join("sessions.json")).len(), 1);
+        // a game open for a few seconds with no fights isn't a session
+        assert_eq!(shared.watch_game(Some(Game::R5)), None);
+        assert_eq!(shared.watch_game(None), None);
+        assert_eq!(shared.lock().sessions.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -260,6 +260,8 @@ fn refresh(app: &AppWindow, shared: &Shared) {
     let (has_avatar, has_banner) = PICS.with(|p| *p.borrow());
     app.set_profile(view::profile_card(&core, has_avatar, has_banner));
     app.set_share(view::share_card(&core, has_avatar, has_banner));
+    let open_recap = UI.with(|ui| ui.borrow().recap);
+    app.set_recap(open_recap.and_then(|i| view::recap_page(&core, i)).unwrap_or_default());
     let open_rival = UI.with(|ui| ui.borrow().rival.clone());
     app.set_rival(open_rival.and_then(|(key, opp)| view::rival_page(&core, &key, &opp)).unwrap_or_default());
     let open_detail = UI.with(|ui| ui.borrow().detail.clone());
@@ -590,6 +592,51 @@ fn wire(app: &AppWindow, shared: &Arc<Shared>) {
         let (w, s) = ctx!();
         move |key, opponent| {
             UI.with(|ui| ui.borrow_mut().rival = Some((key.to_string(), opponent.to_string())));
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_open_recap({
+        let (w, s) = ctx!();
+        move |i| {
+            UI.with(|ui| ui.borrow_mut().recap = usize::try_from(i).ok());
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_close_recap({
+        let (w, s) = ctx!();
+        move || {
+            UI.with(|ui| ui.borrow_mut().recap = None);
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_recap_step({
+        let (w, s) = ctx!();
+        move |dir| {
+            let count = s.lock().sessions.len();
+            UI.with(|ui| {
+                let mut ui = ui.borrow_mut();
+                if let Some(i) = ui.recap {
+                    let next = i as i64 + dir.signum() as i64;
+                    if next >= 0 && (next as usize) < count {
+                        ui.recap = Some(next as usize);
+                    }
+                }
+            });
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_recap_auto({
+        let (w, s) = ctx!();
+        move |on| {
+            s.lock().set_setting("recapAuto", on.into());
             if let Some(app) = w.upgrade() {
                 refresh(&app, &s);
             }
@@ -1317,6 +1364,8 @@ mod screenshot {
         pub detail_game: String,
         /// open the head-to-head with the most-fought opponent of this game's first tracked player
         pub rival: Option<String>,
+        /// open the newest session's recap
+        pub recap: bool,
         /// show the Servers tab
         pub servers_tab: bool,
         /// open Settings on this tab (0 general, 1 Experimental: Discord, 2 updates)
@@ -1404,6 +1453,12 @@ mod screenshot {
                         UI.with(|ui| ui.borrow_mut().detail = Some((key.clone(), view::row_id(h[i].t))));
                     }
                 }
+            }
+        }
+        if o.recap {
+            let n = shared.lock().sessions.len();
+            if n > 0 {
+                UI.with(|ui| ui.borrow_mut().recap = Some(n - 1));
             }
         }
         if let Some(game) = &o.rival {
@@ -1590,6 +1645,7 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 detail_upset: args.iter().any(|a| a == "--detail-upset"),
                 detail_game: arg_value(&args, "--detail-game").unwrap_or_else(|| "r5".into()),
                 rival: arg_value(&args, "--rival"),
+                recap: args.iter().any(|a| a == "--recap"),
                 servers_tab: arg_value(&args, "--tab").as_deref() == Some("servers"),
                 settings: arg_value(&args, "--settings").map(|v| match v.as_str() {
                     "experimental" | "widget" => 1,
@@ -1629,6 +1685,7 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 detail_upset: false,
                 detail_game: String::new(),
                 rival: None,
+                recap: false,
                 servers_tab: false,
                 settings: None,
                 click: None,
@@ -1710,6 +1767,19 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             if round % 30 == 0 {
                 changed |= r5_shared.check_r5_patch(true);
                 changed |= r5_shared.check_ql_log();
+            }
+            // a game closing ends a session: its recap opens (unless switched off in Settings)
+            if round % 5 == 0 {
+                if let Some(i) = r5_shared.watch_game(rpc::game_running()) {
+                    let auto = r5_shared.lock().state.settings.get("recapAuto").and_then(Value::as_bool).unwrap_or(true);
+                    let s = r5_shared.clone();
+                    let _ = r5_weak.upgrade_in_event_loop(move |app| {
+                        if auto {
+                            UI.with(|ui| ui.borrow_mut().recap = Some(i));
+                        }
+                        refresh(&app, &s);
+                    });
+                }
             }
             round = round.wrapping_add(1);
             if changed {

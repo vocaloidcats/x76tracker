@@ -35,6 +35,8 @@ export struct PlayerCard {
     has-num: bool, points-num: float, points-from: float, elo-num: float, elo-from: float,
     // the period's nemesis (beats you most) and favourite victim, with your record against them
     nemesis: string, nemesis-rec: string, victim: string, victim-rec: string,
+    // this game's latest session (index), when this is the player picked as yours; -1 if none
+    recap: int,
 }
 export struct SearchResult { id: string, rank: string, name: string, tier: string, tier-key: int, points: string, alias: string, tracked: bool }
 export struct GameData { id: string, label: string, mode: string, placeholder: string, players: [PlayerCard] }
@@ -52,6 +54,13 @@ export struct RivalPage {
     open: bool, key: string, game: string, name: string, tier: string, tier-key: int, rank: string,
     headline: string, lead: int, tiles: [RivalTile], fights: [RivalFight], more: string,
     can-track: bool, track-id: string, has-acc: bool, hint: string,
+}
+// session recap: one stretch of playing, from the game starting to it closing
+export struct RecapLine { label: string, name: string, value: string, dir: int }
+export struct RecapPage {
+    open: bool, index: int, key: string, title: string, subtitle: string, record: string, lead: int,
+    tier-from: string, tier-to: string, tier-key: int, tiles: [RivalTile], lines: [RecapLine], note: string,
+    has-prev: bool, has-next: bool,
 }
 export struct EventDetail {
     open: bool, key: string, game: string, title: string, subtitle: string,
@@ -72,7 +81,7 @@ export struct ProfileCard {
 export struct WidgetSlot { key: string, kind: int, surface: string, name: string, source: int, custom: string, is-custom: bool }
 export struct StaticText { surface: string, name: string, text: string }
 export struct DiscordPage {
-    rpc: bool, rpc-app: string, r5-patch: bool, r5-found: bool, ql-log: bool,
+    rpc: bool, rpc-app: string, r5-patch: bool, r5-found: bool, ql-log: bool, recap-auto: bool,
     players-r5: [string], player-r5: int, players-ql: [string], player-ql: int,
     widget: bool, app-id: string, user-id: string, has-token: bool, widget-rpc: bool,
     slots: [WidgetSlot], statics: [StaticText],
@@ -114,6 +123,10 @@ export global Actions {
     callback close-event();
     callback open-rival(key: string, opponent: string);
     callback close-rival();
+    callback open-recap(index: int);
+    callback close-recap();
+    callback recap-step(dir: int);
+    callback recap-auto(on: bool);
     callback profile-link(handle: string);
     callback profile-unlink();
     callback open-x76();
@@ -981,9 +994,14 @@ component PlayerCardView inherits Rectangle {
                     if root.p.site24-places-dir != 0: Delta { text: root.p.site24-places; dir: root.p.site24-places-dir; size: 11px; mono: true; }
                 }
             }
-            if root.p.nemesis != "" || root.p.victim != "": HorizontalLayout {
+            if root.p.nemesis != "" || root.p.victim != "" || root.p.recap >= 0: HorizontalLayout {
                 alignment: start;
                 spacing: 16px;
+                if root.p.recap >= 0: Mono {
+                    text: "last session";
+                    color: rec-ta.has-hover ? Theme.fg : Theme.accent-fg;
+                    rec-ta := TouchArea { mouse-cursor: pointer; clicked => { Actions.open-recap(root.p.recap); } }
+                }
                 if root.p.nemesis != "": HorizontalLayout {
                     spacing: 5px;
                     Mono { text: "nemesis"; }
@@ -1870,6 +1888,122 @@ component RivalFightRow inherits Rectangle {
     }
 }
 
+component RecapPanel inherits Rectangle {
+    in property <RecapPage> r;
+    property <float> k: 0;
+    Timer { interval: 16ms; running: root.k < 1; triggered => { root.k = min(1, root.k + 16 / 240); } }
+    property <float> ek: 1 - Math.pow(1 - root.k, 3);
+    opacity: root.ek;
+    background: #000000a6;
+    TouchArea { clicked => { Actions.close-recap(); } }
+    panel := Rectangle {
+        width: min(640px, root.width - 48px);
+        height: min(root.height - 64px, body.preferred-height + 2px);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2 + (1 - root.ek) * 22px;
+        background: Theme.canvas;
+        border-radius: 16px;
+        border-width: 1px;
+        border-color: Theme.line-2;
+        clip: true;
+        TouchArea { }
+        inner := ScrollView {
+            content-width: self.visible-width;
+            content-height: body.preferred-height;
+            body := VerticalLayout {
+                width: inner.visible-width;
+                padding: 22px;
+                spacing: 14px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout {
+                        spacing: 4px;
+                        horizontal-stretch: 1;
+                        Eyebrow { text: "SESSION RECAP"; }
+                        Text { text: root.r.title; font-size: 22px; font-weight: 600; letter-spacing: -0.4px; color: Theme.fg; }
+                        Mono { text: root.r.subtitle; font-size: 11.5px; wrap: word-wrap; }
+                    }
+                    VerticalLayout {
+                        alignment: start;
+                        horizontal-stretch: 0;
+                        RoundButton { icon: "M 2.5 2.5 L 9.5 9.5 M 9.5 2.5 L 2.5 9.5"; clicked => { Actions.close-recap(); } }
+                    }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 8px;
+                    Rectangle {
+                        border-radius: self.height / 2;
+                        background: root.r.lead > 0 ? Theme.positive.with-alpha(0.16) : root.r.lead < 0 ? Theme.danger.with-alpha(0.16) : Theme.surface-2;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            padding-top: 4px;
+                            padding-bottom: 4px;
+                            Text { text: root.r.record; font-size: 14px; font-weight: 600; color: root.r.lead > 0 ? Theme.positive : root.r.lead < 0 ? Theme.danger : Theme.fg; }
+                        }
+                    }
+                    if root.r.tier-from != root.r.tier-to && root.r.tier-to != "" && root.r.tier-from != "": Rectangle {
+                        border-radius: self.height / 2;
+                        background: Theme.surface-2;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 12px;
+                            spacing: 6px;
+                            VerticalLayout { alignment: center; Gem { tier-key: root.r.tier-key; size: 20px; } }
+                            Text { text: root.r.tier-from + "  →  " + root.r.tier-to; font-size: 13px; font-weight: 600; color: Theme.fg; vertical-alignment: center; }
+                        }
+                    }
+                }
+                if root.r.tiles.length > 0: HorizontalLayout {
+                    spacing: 8px;
+                    for t in root.r.tiles: RivalTileView { t: t; horizontal-stretch: 1; }
+                }
+                if root.r.lines.length > 0: VerticalLayout {
+                    spacing: 6px;
+                    for l in root.r.lines: Rectangle {
+                        height: 40px;
+                        background: Theme.surface;
+                        border-radius: 8px;
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 12px;
+                            Mono { text: l.label; vertical-alignment: center; min-width: 120px; horizontal-stretch: 0; }
+                            Text {
+                                text: l.name;
+                                font-size: 14px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                                color: name-ta.has-hover && l.name != "" ? Theme.accent-fg : Theme.fg;
+                                name-ta := TouchArea {
+                                    mouse-cursor: l.name != "" ? pointer : default;
+                                    clicked => { if (l.name != "") { Actions.open-rival(root.r.key, l.name); } }
+                                }
+                            }
+                            Mono {
+                                text: l.value;
+                                vertical-alignment: center;
+                                horizontal-stretch: 0;
+                                color: l.dir > 0 ? Theme.positive : l.dir < 0 ? Theme.danger : Theme.fg;
+                            }
+                        }
+                    }
+                }
+                Text { text: root.r.note; font-size: 12px; color: Theme.fg-faint; wrap: word-wrap; }
+                HorizontalLayout {
+                    alignment: space-between;
+                    if root.r.has-prev: Button { text: "Older session"; kind: 1; clicked => { Actions.recap-step(-1); } }
+                    if !root.r.has-prev: Rectangle { }
+                    if root.r.has-next: Button { text: "Newer session"; kind: 1; clicked => { Actions.recap-step(1); } }
+                }
+            }
+        }
+    }
+}
+
 component RivalPanel inherits Rectangle {
     in property <RivalPage> r;
     // opening: fade in and rise (a Timer tween; Slint's `animate` jumps to the end in the real window)
@@ -2673,6 +2807,14 @@ component SettingsPanel inherits Rectangle {
                         toggled(v) => { Actions.ql-log(v); }
                     }
                     StatusLine { text: root.qllog-status; state: root.qllog-state; }
+                    Rectangle { height: 1px; background: Theme.line-1; }
+                    Eyebrow { text: "SESSION RECAP"; }
+                    SettingRow {
+                        on: root.d.recap-auto;
+                        title: "Show a recap when I close a game";
+                        body: "When R5Reloaded or Quake Live closes, x76tracker opens a summary of the session: wins and losses, Elo, points and rank, your best win, nemesis and accuracy. Your card's last session link opens it again.";
+                        toggled(v) => { Actions.recap-auto(v); }
+                    }
                 }
                 }
 
@@ -2926,6 +3068,7 @@ export component AppWindow inherits Window {
     in property <image> banner;
     in property <EventDetail> detail;
     in property <RivalPage> rival;
+    in property <RecapPage> recap;
     in-out property <int> tab; // 0 ladders, 1 servers
     in property <ServersPage> servers;
     in property <string> servers-status;
@@ -3453,6 +3596,14 @@ export component AppWindow inherits Window {
         width: root.width;
         height: root.height - 64px;
         d: root.detail;
+    }
+
+    // ------------------------------------------------ session recap
+    if root.recap.open: RecapPanel {
+        y: 64px;
+        width: root.width;
+        height: root.height - 64px;
+        r: root.recap;
     }
 
     // ------------------------------------------------ head-to-head (also over the result panel it may come from)

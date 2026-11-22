@@ -160,7 +160,8 @@ fn running() -> Vec<String> {
     Vec::new()
 }
 
-fn game_running() -> Option<Game> {
+/// The x76 game running now (R5Reloaded first, if both are).
+pub fn game_running() -> Option<Game> {
     let names = running();
     if names.iter().any(|n| n == R5_EXE) {
         Some(Game::R5)
