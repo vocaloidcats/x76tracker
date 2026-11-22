@@ -46,6 +46,8 @@ thread_local! {
     static TOAST: RefCell<Option<Toast>> = const { RefCell::new(None) };
     static TOAST_QUEUE: RefCell<VecDeque<tracker::Note>> = const { RefCell::new(VecDeque::new()) };
     static TOAST_BUSY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Compact mode's window while it's open.
+    static MINI: RefCell<Option<Mini>> = const { RefCell::new(None) };
     // what the Discord settings page was last built from (see set_discord_page)
     static DISCORD_SIG: RefCell<String> = const { RefCell::new(String::new()) };
     // What's new pictures, decoded (cleared when the menu closes)
@@ -238,6 +240,7 @@ fn period_of(core: &tracker::Core) -> Period {
 /// Rebuilds both game columns from the tracker state. Runs after checks and user actions.
 fn refresh(app: &AppWindow, shared: &Shared) {
     deliver_notes(app, shared);
+    update_mini(app, shared);
     let mut core = shared.lock();
     let fresh = std::mem::take(&mut core.fresh);
     let period = period_of(&core);
@@ -418,8 +421,99 @@ fn show_next_toast(app: slint::Weak<AppWindow>) {
     std::mem::forget(timer); // it stops itself; the clone inside keeps it alive until then
 }
 
+/// Opens or closes compact mode, and remembers which (it comes back with the app).
+fn set_mini(app: &AppWindow, shared: &Arc<Shared>, on: bool) {
+    shared.lock().set_setting("miniOpen", on.into());
+    if !on {
+        MINI.with(|m| {
+            if let Some(w) = m.borrow_mut().take() {
+                save_mini_pos(&w, shared);
+                let _ = w.hide();
+            }
+        });
+        return;
+    }
+    if MINI.with(|m| m.borrow().is_some()) {
+        return;
+    }
+    OVERLAY_NEXT.store(true, Ordering::SeqCst);
+    let Ok(mini) = Mini::new() else { return };
+    mini.global::<Theme>().set_dark(app.global::<Theme>().get_dark());
+    mini.global::<RankIcons>().set_icons(app.global::<RankIcons>().get_icons());
+    mini.on_drag({
+        let w = mini.as_weak();
+        move || {
+            use slint::winit_030::WinitWindowAccessor;
+            if let Some(m) = w.upgrade() {
+                m.window().with_winit_window(|ww| {
+                    let _ = ww.drag_window();
+                });
+            }
+        }
+    });
+    mini.on_dismiss({
+        let (a, s) = (app.as_weak(), shared.clone());
+        move || {
+            if let Some(app) = a.upgrade() {
+                set_mini(&app, &s, false);
+            }
+        }
+    });
+    mini.on_open_app({
+        let a = app.as_weak();
+        move || {
+            if let Some(app) = a.upgrade() {
+                let _ = app.show();
+                win::focus_existing();
+            }
+        }
+    });
+    // where it was last time, else the top right of the main screen
+    let saved = shared.lock().state.settings.get("miniPos").and_then(|v| Some((v.get(0)?.as_i64()? as i32, v.get(1)?.as_i64()? as i32)));
+    let scale = app.window().scale_factor();
+    let (x, y) = saved.unwrap_or_else(|| {
+        let (_, top, right, _) = win::work_area().unwrap_or((0, 0, 1920, 1080));
+        (right - (354.0 * scale).round() as i32, top + (24.0 * scale).round() as i32)
+    });
+    mini.window().set_position(slint::PhysicalPosition::new(x, y));
+    mini.set_rows(slint::ModelRc::new(slint::VecModel::from(view::mini_rows(&shared.lock()))));
+    let _ = mini.show();
+    // the native window exists once the event loop has made it: then make it one clicks can't activate
+    let w = mini.as_weak();
+    slint::Timer::single_shot(Duration::from_millis(120), move || {
+        use slint::winit_030::WinitWindowAccessor;
+        if let Some(m) = w.upgrade() {
+            m.window().with_winit_window(|ww| win::no_activate(ww));
+        }
+    });
+    MINI.with(|m| *m.borrow_mut() = Some(mini));
+}
+
+fn save_mini_pos(mini: &Mini, shared: &Shared) {
+    let p = mini.window().position();
+    let mut core = shared.lock();
+    let now = serde_json::json!([p.x, p.y]);
+    if core.state.settings.get("miniPos") != Some(&now) {
+        core.set_setting("miniPos", now);
+    }
+}
+
+/// Fresh numbers for compact mode (and keeps its position saved after a drag).
+fn update_mini(app: &AppWindow, shared: &Shared) {
+    MINI.with(|m| {
+        if let Some(mini) = m.borrow().as_ref() {
+            save_mini_pos(mini, shared);
+            // the emblems may have loaded after it opened, and the theme may have changed
+            mini.global::<RankIcons>().set_icons(app.global::<RankIcons>().get_icons());
+            mini.global::<Theme>().set_dark(app.global::<Theme>().get_dark());
+            mini.set_rows(slint::ModelRc::new(slint::VecModel::from(view::mini_rows(&shared.lock()))));
+        }
+    });
+}
+
 fn tick(app: &AppWindow, shared: &Shared) {
     deliver_notes(app, shared);
+    update_mini(app, shared);
     // keep the maximize/restore icon right after Win+Up, snapping, or a double-click
     app.global::<WindowCtl>().set_maximized(app.window().is_maximized());
     let core = shared.lock();
@@ -739,6 +833,14 @@ fn wire(app: &AppWindow, shared: &Arc<Shared>) {
             });
             if let Some(app) = w.upgrade() {
                 refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_mini({
+        let (w, s) = ctx!();
+        move |on| {
+            if let Some(app) = w.upgrade() {
+                set_mini(&app, &s, on);
             }
         }
     });
@@ -1916,6 +2018,17 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         slint::run_event_loop_until_quit()?;
         return Ok(());
     }
+    // docs builds: compact mode alone for a few seconds (to check focus and looks)
+    #[cfg(feature = "docs")]
+    if args.iter().any(|a| a == "--mini-test") {
+        startup(&app, &shared);
+        set_mini(&app, &shared, true);
+        slint::Timer::single_shot(Duration::from_secs(8), || {
+            let _ = slint::quit_event_loop();
+        });
+        slint::run_event_loop_until_quit()?;
+        return Ok(());
+    }
     wire(&app, &shared);
     wire_window(&app);
     startup(&app, &shared);
@@ -1935,6 +2048,10 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         link_profile(&app, &shared, h); // linked earlier: load the card again
     }
     load_rank_icons(&app, &shared);
+    // compact mode comes back if it was open when x76tracker closed
+    if shared.lock().state.settings.get("miniOpen").and_then(Value::as_bool).unwrap_or(false) {
+        set_mini(&app, &shared, true);
+    }
 
     let (poller, notify_to, weak) = (shared.clone(), shared.clone(), app.as_weak());
     std::thread::spawn(move || {

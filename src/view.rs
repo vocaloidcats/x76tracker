@@ -4,7 +4,7 @@ use crate::tracker::{key_of, now, Core, Favorite, Game, Hit, Player, Snap};
 use crate::{
     ChangeEntry, ChangeItem, ChangeMedia, ChangeSection, ShareCard, ShareGame, UpdatesPage,
     ChartData, ChartPoint, DiscordPage, EventDetail, EventRow, FightDetail, GameData, GameRank, Opponent, PlayerCard, ProfileCard, SearchResult,
-    RecapLine, RecapPage, RivalFight, RivalPage, RivalTile,
+    MiniRow, RecapLine, RecapPage, RivalFight, RivalPage, RivalTile,
     ServerGame, ServerRow, ServersPage, StatChange, StaticText, Tick, WidgetSlot,
 };
 use chrono::{DateTime, Local, TimeZone};
@@ -628,6 +628,56 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
         victim_rec: s(victim.as_ref().map(|r| format!("{}–{}", r.wins, r.losses)).unwrap_or_default()),
         recap,
     }
+}
+
+// ------------------------------------------------------------------ compact mode
+/// Compact mode's rows: each game's player picked as yours, the game being played first. The
+/// change is since the session started while playing, else over the last 24 hours.
+pub fn mini_rows(core: &Core) -> Vec<MiniRow> {
+    let cfg = crate::discord::Config::load(core);
+    let mut games = vec![Game::R5, Game::Ql];
+    if let Some((g, _)) = core.playing {
+        games.sort_by_key(|x| *x != g);
+    }
+    let mut out = Vec::new();
+    for game in games {
+        let Some(id) = cfg.player(core, game) else { continue };
+        let key = key_of(game.id(), &id);
+        let Some(fav) = core.state.favorites.iter().find(|f| f.game == game.id() && f.id == id) else { continue };
+        let h: &[Snap] = core.state.history.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+        let live = core.latest.get(&key).and_then(Option::as_ref);
+        let last = h.last();
+        let elo = live.and_then(|p| p.elo).or_else(|| last.and_then(|x| x.elo));
+        let tier = live.map(|p| p.tier.clone()).or_else(|| last.map(|x| x.tier.clone())).unwrap_or_default();
+        let rank = live.map(|p| p.rank).or_else(|| last.and_then(|x| x.rank));
+        let (since_t, since) = match core.playing {
+            Some((g, start)) if g == game => (start, "this session"),
+            _ => (now() - RECENT_SECS, "48h"),
+        };
+        let d = baseline(h, since_t).and_then(|b| b.elo).zip(elo).map(|(b, e)| e - b).unwrap_or(0.0);
+        let fights = fights_for(core, game, &id);
+        let newest = fights.last();
+        let last_text = newest
+            .map(|f| format!("last: {} vs {} · {}", if f.kind == "kill" { "won" } else { "lost" }, if f.opponent.is_empty() { "?" } else { f.opponent.as_str() }, short_when(f.t)))
+            .unwrap_or_default();
+        let streak = newest.map(|n| fights.iter().rev().take_while(|f| f.kind == n.kind).count()).unwrap_or(0);
+        out.push(MiniRow {
+            game: s(game.label()),
+            name: s(fav.name.as_str()),
+            tier_key: tier_key(&tier),
+            tier: s(tier.as_str()),
+            rank: s(rank.map(|r| format!("#{}", thousands(r))).unwrap_or_default()),
+            elo: s(elo.map(|e| thousands(e.round() as i64)).unwrap_or_else(|| "–".into())),
+            delta: s(two_decimals(d.abs())),
+            delta_dir: if d.abs() < 0.005 { 0 } else if d > 0.0 { 1 } else { -1 },
+            since: s(since),
+            last: s(last_text),
+            last_dir: newest.map(|f| if f.kind == "kill" { 1 } else { -1 }).unwrap_or(0),
+            streak: s(if streak >= 2 { format!("{streak} {} in a row", if newest.is_some_and(|f| f.kind == "kill") { "wins" } else { "losses" }) } else { String::new() }),
+            streak_dir: newest.map(|f| if f.kind == "kill" { 1 } else { -1 }).unwrap_or(0),
+        });
+    }
+    out
 }
 
 // ------------------------------------------------------------------ session recap
