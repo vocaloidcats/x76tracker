@@ -310,6 +310,20 @@ pub fn step_path(points: &ModelRc<ChartPoint>, w: f32, h: f32, area: bool) -> Sh
 }
 
 // ------------------------------------------------------------------ cards
+/// A tracked player's fights from the game's own log: R5Reloaded by in-game name, Quake Live by
+/// SteamID (the console log's account folder).
+fn fights_for<'a>(core: &'a Core, game: Game, id: &str) -> Vec<&'a crate::r5log::Fight> {
+    match game {
+        Game::R5 => core.fights.iter().filter(|f| f.me.eq_ignore_ascii_case(id)).collect(),
+        Game::Ql => core.ql_fights.iter().filter(|f| f.me == id).collect(),
+    }
+}
+
+/// "47%" for an accuracy.
+fn pct(v: f64) -> String {
+    format!("{v:.0}%")
+}
+
 /// One opponent as shown in a fight entry, with their rating before the fight.
 fn opponent_of(f: &crate::r5log::Fight) -> Opponent {
     let won = f.kind == "kill";
@@ -517,11 +531,9 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
         _ => period.word().to_string(),
     };
 
-    let mine: Vec<&crate::r5log::Fight> = if game == Game::R5 {
-        core.fights.iter().filter(|f| f.me.eq_ignore_ascii_case(&fav.id)).collect()
-    } else {
-        Vec::new()
-    };
+    let mine = fights_for(core, game, &fav.id);
+    // Quake Live: your accuracy over this period's fights (the ladder has none)
+    let fight_acc: Vec<f64> = mine.iter().filter(|f| f.t >= start).filter_map(|f| f.my_acc).collect();
     let show_elo = metric_is_elo(core, &key);
     let show_all = ui.show_all.contains(&key);
     let chart_data = chart(h, start, show_elo);
@@ -584,7 +596,14 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
         total_events: total_rows as i32,
         kd: s(format!("{} / {}", thousands(kills), thousands(deaths))),
         kd_ratio: s(if deaths > 0 { format!("{:.2}", kills as f64 / deaths as f64) } else { "–".into() }),
-        acc: s(live.and_then(|p| p.acc).map(|a| format!("{a:.0}%")).unwrap_or_default()),
+        acc: s(live.and_then(|p| p.acc).map(pct).unwrap_or_else(|| {
+            if fight_acc.is_empty() {
+                String::new()
+            } else {
+                let n = fight_acc.len();
+                format!("{} · {n} fight{}", pct(fight_acc.iter().sum::<f64>() / n as f64), if n == 1 { "" } else { "s" })
+            }
+        })),
         site24: s(site24),
         site24_dir,
         site24_places: s(pos24.map(|v| v.abs().to_string()).unwrap_or_default()),
@@ -629,7 +648,7 @@ pub struct PlayerStats {
     /// The tier 48 hours ago (or when tracking started).
     pub recent_tier_from: String,
     pub peak_elo: Option<f64>,
-    /// Highest-rated opponent beaten in the last 48 hours (R5, from the game log).
+    /// Highest-rated opponent beaten in the last 48 hours (from the game log: R5Reloaded's, or Quake Live's console log).
     pub best_win: Option<(String, f64)>,
 }
 
@@ -647,15 +666,11 @@ pub fn player_stats(core: &Core, game: Game, id: &str) -> Option<PlayerStats> {
     let base = baseline(h, start);
     let (wins, losses) = events(h, start).iter().fold((0, 0), |(w, l), e| (w + e.w, l + e.l));
     let peak_elo = h.iter().filter_map(|s| s.elo).chain(elo).reduce(f64::max);
-    let best_win = if game == Game::R5 {
-        core.fights
-            .iter()
-            .filter(|f| f.kind == "kill" && f.t >= start && f.me.eq_ignore_ascii_case(id))
-            .filter_map(|f| f.opp_elo.map(|e| (f.opponent.clone(), e)))
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-    } else {
-        None
-    };
+    let best_win = fights_for(core, game, id)
+        .into_iter()
+        .filter(|f| f.kind == "kill" && f.t >= start)
+        .filter_map(|f| f.opp_elo.map(|e| (f.opponent.clone(), e)))
+        .max_by(|a, b| a.1.total_cmp(&b.1));
     Some(PlayerStats {
         rank: live.map(|p| p.rank).or_else(|| last.and_then(|s| s.rank)),
         points,
@@ -748,11 +763,7 @@ pub fn event_detail(core: &Core, key: &str, id: &str) -> Option<EventDetail> {
         change("K/D", Some(kd(a.kills, a.deaths)), Some(kd(b.kills, b.deaths)), &|v| format!("{v:.3}"), &|d| format!("{d:.3}"), 0.0005, true),
     ];
 
-    let fights: Vec<&crate::r5log::Fight> = if game == Game::R5 {
-        core.fights.iter().filter(|f| f.me.eq_ignore_ascii_case(fav_id) && f.t > a.t && f.t <= b.t).collect()
-    } else {
-        Vec::new()
-    };
+    let fights: Vec<&crate::r5log::Fight> = fights_for(core, game, fav_id).into_iter().filter(|f| f.t > a.t && f.t <= b.t).collect();
     let (dw, dl) = ((b.kills - a.kills).max(0), (b.deaths - a.deaths).max(0));
     let (w, l) = if dw == 0 && dl == 0 && !fights.is_empty() {
         (fights.iter().filter(|f| f.kind == "kill").count() as i64, fights.iter().filter(|f| f.kind == "death").count() as i64)
@@ -775,10 +786,11 @@ pub fn event_detail(core: &Core, key: &str, id: &str) -> Option<EventDetail> {
             let gap = f.opp_elo.zip(f.my_elo).map(|(o, m)| o - m);
             let chance = f.my_elo.zip(f.opp_elo).map(|(m, o)| win_chance(m, o));
             let upset = chance.is_some_and(|c| (won && c < 0.35) || (!won && c > 0.65));
-            // the opponent as they are now, from the latest ladder check
+            // the opponent as they are now, from the latest ladder check (Quake Live: by SteamID)
+            let opp_id = f.opp_id.clone().unwrap_or_else(|| f.opponent.clone());
             let now_p = board.and_then(|bd| {
                 bd.by_id
-                    .get(&f.opponent)
+                    .get(&opp_id)
                     .and_then(|v| v.first())
                     .map(|&i| &bd.players[i])
                     .or_else(|| bd.players.iter().find(|p| p.name.eq_ignore_ascii_case(&f.opponent)))
@@ -811,13 +823,23 @@ pub fn event_detail(core: &Core, key: &str, id: &str) -> Option<EventDetail> {
                 upset,
                 now: s(now),
                 rated: f.opp_elo.is_some(),
-                can_track: !f.opponent.is_empty() && !tracked.iter().any(|t| t.eq_ignore_ascii_case(&f.opponent)),
+                // Quake Live players are tracked by SteamID, so only once the ladder knows who it was
+                can_track: !f.opponent.is_empty()
+                    && (game == Game::R5 || f.opp_id.is_some())
+                    && !tracked.iter().any(|t| t.eq_ignore_ascii_case(&opp_id)),
+                track_id: s(opp_id.as_str()),
+                acc: s(match (f.my_acc, f.opp_acc) {
+                    (Some(m), Some(o)) => format!("accuracy: you {} · them {}", pct(m), pct(o)),
+                    (Some(m), None) => format!("accuracy: you {}", pct(m)),
+                    (None, Some(o)) => format!("accuracy: them {}", pct(o)),
+                    _ => String::new(),
+                }),
             }
         })
         .collect();
 
-    let hint = if game != Game::R5 {
-        "Who you fought is only known for R5Reloaded, from the game log.".to_string()
+    let hint = if fight_rows.is_empty() && game == Game::Ql {
+        "No fights from the console log in this change. To see who you fight, turn on Quake Live opponents in Settings.".to_string()
     } else if fight_rows.is_empty() {
         "No fights from the game log in this change. To see who you fight, turn on R5Reloaded opponents in Settings.".to_string()
     } else if fight_rows.iter().any(|f| !f.rated) {
@@ -1154,6 +1176,7 @@ pub fn discord_page(core: &Core) -> DiscordPage {
         rpc_app: s(rpc_app),
         r5_patch: core.r5patch == Some(crate::r5patch::State::On),
         r5_found: r5_dir.is_some(),
+        ql_log: core.qllog == Some(true),
         players_r5: model(r5_names.into_iter().map(s).collect()),
         player_r5: r5_i,
         players_ql: model(ql_names.into_iter().map(s).collect()),
@@ -1297,6 +1320,34 @@ pub fn patch_status(core: &Core) -> (String, i32) {
         (Some(State::Off), _) => ("Off. The game's script is untouched.".into(), 0),
         (Some(State::NoScript), _) => ("This R5Reloaded folder has no cl_obituary.gnut, so there's nothing to patch.".into(), 3),
         (None, _) => ("Checking the game folder…".into(), 1),
+    }
+}
+
+/// Quake Live's console log switch: (text, state as for Discord's lines).
+pub fn ql_log_status(core: &Core) -> (String, i32) {
+    let Some(dir) = core.setting_str("qlPath") else {
+        return (r"Quake Live wasn't found. Its account folder (Quake Live\<SteamID>\baseq3) turns up once the game has run.".into(), 3);
+    };
+    let dir = std::path::Path::new(&dir);
+    let log = dir.join("qconsole.log");
+    let written = log.metadata().and_then(|m| m.modified()).ok().and_then(|m| m.elapsed().ok()).map(|e| e.as_secs_f64());
+    let whose = crate::qllog::account_of(dir).map(|id| format!(" of SteamID {id}")).unwrap_or_default();
+    let note = core.qllog_note.as_ref();
+    if let Some((true, e)) = note {
+        return (e.clone(), 3);
+    }
+    let extra = note.map(|(_, t)| format!(" {t}")).unwrap_or_default();
+    match core.qllog {
+        Some(true) => match written {
+            Some(age) if age < 600.0 => (format!("On, and reading the console log{whose}."), 2),
+            _ => (format!("On: autoexec.cfg turns the console log on when Quake Live starts.{extra}"), 1),
+        },
+        Some(false) => match written {
+            // switched on in the console by hand
+            Some(age) if age < 600.0 => (format!("Off in autoexec.cfg, but logfile is on in the game right now, so the console log{whose} is read anyway."), 2),
+            _ => ("Off. autoexec.cfg is untouched.".into(), 0),
+        },
+        None => ("Checking the game folder…".into(), 1),
     }
 }
 

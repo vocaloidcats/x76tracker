@@ -15,6 +15,7 @@ slint::include_modules!();
 
 mod discord;
 mod profile;
+mod qllog;
 mod r5log;
 mod r5patch;
 mod ranks;
@@ -330,6 +331,9 @@ fn tick(app: &AppWindow, shared: &Shared) {
     let (t, st) = view::patch_status(&core);
     app.set_patch_status(t.into());
     app.set_patch_state(st);
+    let (t, st) = view::ql_log_status(&core);
+    app.set_qllog_status(t.into());
+    app.set_qllog_state(st);
     let (t, st) = view::update_status(&core);
     app.set_update_status(t.into());
     app.set_update_state(st);
@@ -854,6 +858,29 @@ fn wire(app: &AppWindow, shared: &Arc<Shared>) {
             }
         }
     });
+    actions.on_ql_log({
+        let (w, s) = ctx!();
+        move |on| {
+            let dir = s.lock().setting_str("qlPath").map(PathBuf::from);
+            let result = match &dir {
+                None => Err("Quake Live wasn't found. Start it once, then try again.".to_string()),
+                Some(d) if on => qllog::install(d),
+                Some(d) => qllog::remove(d),
+            };
+            {
+                let mut core = s.lock();
+                core.qllog_note = match result {
+                    Ok(()) if on => Some((false, r"In Quake Live's console, type \set logfile 2 to start now, or restart the game.".to_string())),
+                    Ok(()) => None,
+                    Err(e) => Some((true, e)),
+                };
+            }
+            s.check_ql_log();
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
     actions.on_r5_path({
         let (w, s) = ctx!();
         move |text| {
@@ -1263,9 +1290,11 @@ mod screenshot {
         pub theme: Option<bool>,
         pub hover: Option<(f32, f32)>,
         pub offline: bool,
-        /// open the detail panel on the newest R5 result that has fights in it (or an upset win)
+        /// open the detail panel on the newest result that has fights in it (or an upset win)
         pub detail: bool,
         pub detail_upset: bool,
+        /// which game's result that is: "r5" (the default) or "ql"
+        pub detail_game: String,
         /// show the Servers tab
         pub servers_tab: bool,
         /// open Settings on this tab (0 general, 1 Discord widget)
@@ -1304,6 +1333,8 @@ mod screenshot {
         }
         shared.scan_r5(&mut r5log::Tail::default());
         shared.check_r5_patch(false);
+        shared.scan_ql(&mut qllog::Tail::default());
+        shared.check_ql_log();
         let saved_handle = shared.lock().setting_str("x76Handle");
         let pics = if o.card {
             // the card only needs the profile and its pictures, not fresh ladders
@@ -1336,14 +1367,16 @@ mod screenshot {
         }
         if o.detail || o.detail_upset {
             let core = shared.lock();
-            if let Some(f) = core.state.favorites.iter().find(|f| f.game == "r5") {
-                let key = tracker::key_of("r5", &f.id);
+            let game = o.detail_game.as_str();
+            let fights = if game == "ql" { &core.ql_fights } else { &core.fights };
+            if let Some(f) = core.state.favorites.iter().find(|f| f.game == game) {
+                let key = tracker::key_of(game, &f.id);
                 if let Some(h) = core.state.history.get(&key) {
                     let upset_win = |x: &r5log::Fight| {
                         x.kind == "kill" && x.opp_elo.zip(x.my_elo).is_some_and(|(o, m)| 1.0 / (1.0 + 10f64.powf((o - m) / 400.0)) < 0.35)
                     };
                     let has_fights = |i: usize| {
-                        core.fights.iter().any(|x| x.t > h[i - 1].t && x.t <= h[i].t && (!o.detail_upset || upset_win(x)))
+                        fights.iter().any(|x| x.me.eq_ignore_ascii_case(&f.id) && x.t > h[i - 1].t && x.t <= h[i].t && (!o.detail_upset || upset_win(x)))
                     };
                     if let Some(i) = (1..h.len()).rev().find(|&i| has_fights(i)) {
                         UI.with(|ui| ui.borrow_mut().detail = Some((key.clone(), view::row_id(h[i].t))));
@@ -1522,6 +1555,7 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 offline: args.iter().any(|a| a == "--offline"),
                 detail: args.iter().any(|a| a == "--detail"),
                 detail_upset: args.iter().any(|a| a == "--detail-upset"),
+                detail_game: arg_value(&args, "--detail-game").unwrap_or_else(|| "r5".into()),
                 servers_tab: arg_value(&args, "--tab").as_deref() == Some("servers"),
                 settings: arg_value(&args, "--settings").map(|v| match v.as_str() {
                     "widget" => 1,
@@ -1559,6 +1593,7 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 offline: true,
                 detail: false,
                 detail_upset: false,
+                detail_game: String::new(),
                 servers_tab: false,
                 settings: None,
                 click: None,
@@ -1626,16 +1661,20 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         })
     });
 
-    // follow R5Reloaded's log for opponents (only finds anything if the game mod is on)
+    // follow R5Reloaded's log (only finds anything if the game mod is on) and Quake Live's console
+    // log (only written while `logfile` is on) for opponents
     let (r5_shared, r5_weak) = (shared.clone(), app.as_weak());
     std::thread::spawn(move || {
         let mut tail = r5log::Tail::default();
+        let mut ql_tail = qllog::Tail::default();
         let mut round = 0u32;
         loop {
             let mut changed = r5_shared.scan_r5(&mut tail);
+            changed |= r5_shared.scan_ql(&mut ql_tail);
             // the patch: checked now and then, and put back if a game update replaced the script
             if round % 30 == 0 {
                 changed |= r5_shared.check_r5_patch(true);
+                changed |= r5_shared.check_ql_log();
             }
             round = round.wrapping_add(1);
             if changed {

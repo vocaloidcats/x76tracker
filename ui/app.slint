@@ -41,7 +41,7 @@ export struct StatChange { label: string, before: string, after: string, change:
 export struct FightDetail {
     when: string, won: bool, opponent: string, tier: string, tier-key: int, rank: string,
     elo: string, points: string, gap: string, gap-dir: int, chance: string, upset: bool,
-    now: string, rated: bool, can-track: bool,
+    now: string, rated: bool, can-track: bool, track-id: string, acc: string,
 }
 export struct EventDetail {
     open: bool, key: string, game: string, title: string, subtitle: string,
@@ -62,7 +62,7 @@ export struct ProfileCard {
 export struct WidgetSlot { key: string, kind: int, surface: string, name: string, source: int, custom: string, is-custom: bool }
 export struct StaticText { surface: string, name: string, text: string }
 export struct DiscordPage {
-    rpc: bool, rpc-app: string, r5-patch: bool, r5-found: bool,
+    rpc: bool, rpc-app: string, r5-patch: bool, r5-found: bool, ql-log: bool,
     players-r5: [string], player-r5: int, players-ql: [string], player-ql: int,
     widget: bool, app-id: string, user-id: string, has-token: bool, widget-rpc: bool,
     slots: [WidgetSlot], statics: [StaticText],
@@ -121,6 +121,7 @@ export global Actions {
     callback open-url(url: string);
     callback r5-patch(on: bool);
     callback r5-path(folder: string);
+    callback ql-log(on: bool);
     callback update-check();
     callback update-install();
     callback update-setting(which: string, on: bool);
@@ -1645,6 +1646,7 @@ component FightCard inherits Rectangle {
                 if root.f.rank != "": Mono { text: root.f.rank; }
                 if root.f.points != "": Mono { text: root.f.points; }
             }
+            if root.f.acc != "": Mono { text: root.f.acc; font-size: 10.5px; color: Theme.fg-muted; overflow: elide; }
             if root.f.now != "": Mono { text: root.f.now; font-size: 10.5px; color: Theme.fg-faint; overflow: elide; }
         }
         VerticalLayout {
@@ -1669,7 +1671,7 @@ component FightCard inherits Rectangle {
         if root.f.can-track: VerticalLayout {
             alignment: center;
             horizontal-stretch: 0;
-            Button { text: "Track"; kind: 1; clicked => { Actions.track(root.game, root.f.opponent); } }
+            Button { text: "Track"; kind: 1; clicked => { Actions.track(root.game, root.f.track-id); } }
         }
     }
 }
@@ -2348,6 +2350,8 @@ component SettingsPanel inherits Rectangle {
     in property <bool> layout-busy;
     in property <string> patch-status;
     in property <int> patch-state;
+    in property <string> qllog-status;
+    in property <int> qllog-state;
     in property <UpdatesPage> u;
     in property <string> update-status;
     in property <int> update-state;
@@ -2456,6 +2460,15 @@ component SettingsPanel inherits Rectangle {
                         Mono { text: "R5Reloaded folder"; }
                         Field { mono: true; placeholder: "the folder with r5apex.exe, e.g. C:\\R5R Library\\LIVE"; edited(t) => { Actions.r5-path(t); } }
                     }
+                    Rectangle { height: 1px; background: Theme.line-1; }
+                    Eyebrow { text: "QUAKE LIVE OPPONENTS"; }
+                    SettingRow {
+                        on: root.d.ql-log;
+                        title: "Log who I fight in Quake Live";
+                        body: "Adds set logfile 2 to Quake Live's autoexec.cfg, so the game saves its console to qconsole.log. x76tracker reads your kills and deaths there, with both players' accuracy from x76's arena, to show who you fought, their Elo and upsets. Switching this off takes the line out.";
+                        toggled(v) => { Actions.ql-log(v); }
+                    }
+                    StatusLine { text: root.qllog-status; state: root.qllog-state; }
                 }
                 }
 
@@ -2708,6 +2721,8 @@ export component AppWindow inherits Window {
     in property <bool> layout-busy;
     in property <string> patch-status;
     in property <int> patch-state;
+    in property <string> qllog-status;
+    in property <int> qllog-state;
     in property <UpdatesPage> updates;
     in property <[ChangeEntry]> changelog;
     in-out property <bool> changelog-open;
@@ -3264,6 +3279,8 @@ export component AppWindow inherits Window {
         layout-busy: root.layout-busy;
         patch-status: root.patch-status;
         patch-state: root.patch-state;
+        qllog-status: root.qllog-status;
+        qllog-state: root.qllog-state;
         u: root.updates;
         update-status: root.update-status;
         update-state: root.update-state;

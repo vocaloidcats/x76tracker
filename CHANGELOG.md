@@ -2,6 +2,21 @@
 
 Each version's section is shown in the app (What's new) and used as its GitHub release notes. Pictures are paths in this repository; the moving ones are animated PNGs.
 
+## 2.2.3
+
+![A Quake Live result: two wins and a loss against the same opponent, with their tier, rank and Elo, your chance on paper, and both players' accuracy in each fight](docs/changelog/2.2.3-ql-fights@2x.png)
+
+### New
+
+- **Quake Live opponents:** your fights in x76's LG arena now show up like R5Reloaded's: who you fought, their tier, rank and Elo, how far above or below you they were, your chance on paper, and upsets. Each fight also shows both players' accuracy, as the x76 server prints it after the fight. Click a result to see its fights, and track an opponent with one click.
+  ![Quake Live fights on the board, with your accuracy over the last 24 hours](docs/changelog/2.2.3-ql-board@2x.png)
+- **Console log switch:** Settings → General → Log who I fight in Quake Live adds set logfile 2 to Quake Live's autoexec.cfg, so the game saves its console to qconsole.log for x76tracker to read. Switching it off takes the line out again. To start without restarting the game, type \set logfile 2 in its console.
+  ![The Quake Live opponents switch in Settings](docs/changelog/2.2.3-ql-settings@2x.png)
+
+### Improved
+
+- **Quake Live stats:** your Quake Live card shows your average accuracy over the period's fights, and your best win of the last 48 hours now works for Quake Live too, on the Discord widget as well.
+
 ## 2.2.2
 
 ![A share card: banner, avatar and name, then each game's rank emblem, tier, rank, points, Elo and a 48-hour sparkline](docs/images/share-card.png)

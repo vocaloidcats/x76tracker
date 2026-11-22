@@ -21,7 +21,7 @@ pub struct Fight {
     pub t: f64,
     /// "kill" (you won the fight) or "death" (you lost it).
     pub kind: String,
-    /// Your in-game name at the time.
+    /// Your in-game name at the time (Quake Live: your SteamID, from the account's folder).
     pub me: String,
     /// The other player; empty if the game couldn't tell who killed you.
     pub opponent: String,
@@ -38,6 +38,18 @@ pub struct Fight {
     pub opp_rank: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub my_elo: Option<f64>,
+    /// Quake Live: the opponent's SteamID (their ladder id), found by name at that ladder check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opp_id: Option<String>,
+    /// Quake Live: your and the opponent's accuracy in the fight, as the x76 server prints it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub my_acc: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opp_acc: Option<f64>,
+    /// Quake Live: where in the console log it was ("<session line>@<byte>"); its log has no times,
+    /// so this is what tells fights apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src: Option<String>,
 }
 
 impl Fight {

@@ -37,6 +37,17 @@ The x76 ladder only shows totals, so on its own x76tracker can't tell who you fo
 
 ![A result's details: the fight from the game log with the opponent, their tier, rank and Elo, how far above or below you they were, and your chance of winning on paper](docs/images/result-detail-dark.png)
 
+## Quake Live opponents (optional)
+
+The same for Quake Live's LG arena, without changing the game. Quake Live can save everything its console shows to `qconsole.log`, and x76's server prints a line for each kill plus both players' accuracy after every fight you're in. Turn on **Settings → General → Log who I fight in Quake Live** and x76tracker adds `set logfile 2` to your account's `autoexec.cfg` (in `Quake Live\<SteamID>\baseq3`). x76tracker follows the log, finds your kills and deaths by your in-game name, and looks each opponent up on the ladder by name.
+
+- It takes effect the next time Quake Live starts. To start right away, type `\set logfile 2` in the game's console.
+- `autoexec.cfg` is saved first as `autoexec.cfg.bak-x76tracker`. Switching the setting off takes the line out again. The x76 launcher keeps its own line in the same file and leaves other lines alone.
+- The log has no times in it, so a fight gets the time x76tracker read it, a couple of seconds after it happened. Fights from while x76tracker was closed get estimated times, and Quake Live starts the log over each time the game starts.
+- The account folder's name is your SteamID, which is also your id on the Quake Live ladder, so the fights go to the right player.
+
+![A Quake Live result: two wins and a loss against the same opponent, with their tier, rank, Elo and both players' accuracy](docs/changelog/2.2.3-ql-fights@2x.png)
+
 ## Discord (optional)
 
 Open **Settings** (the sliders button in the title bar).
@@ -58,7 +69,7 @@ x76tracker.exe --screenshot out.png [--size 1440x1000] [--light|--dark] [--hover
                [--tab servers] [--settings general|widget|updates] [--preview-update 2.3.0]
                                             draw the window into a PNG without showing it
                                             (--preview-update pretends that version is on GitHub)
-x76tracker.exe --screenshot out.png [--whats-new N] [--detail | --detail-upset]
+x76tracker.exe --screenshot out.png [--whats-new N] [--detail | --detail-upset] [--detail-game ql]
                [--record FRAMES [--fps 20] [--crop x,y,w,h] [--click-at F] [--hover-at F]]
                                             open What's new or a result; --record writes an animated PNG
 x76tracker.exe --card out.png              the share card alone, as a 1280×672 PNG

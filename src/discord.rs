@@ -238,9 +238,6 @@ fn per_game(list: &[(&str, &str)]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for g in [Game::R5, Game::Ql] {
         for (id, menu) in list {
-            if (*id == "best_win" || *id == "card_best") && g != Game::R5 {
-                continue; // fights only come from R5Reloaded's log
-            }
             out.push((format!("{}.{id}", g.id()), format!("{} {menu}", short(g))));
         }
     }

@@ -309,6 +309,13 @@ pub struct Core {
     /// Your R5Reloaded fights from the game log (needs the optional game mod); kept in fights.json.
     pub fights: Vec<crate::r5log::Fight>,
     pub fights_file: PathBuf,
+    /// Your Quake Live fights from the game's console log (needs `logfile` on); kept in ql-fights.json.
+    pub ql_fights: Vec<crate::r5log::Fight>,
+    pub ql_fights_file: PathBuf,
+    /// The Quake Live console log switch as it is in autoexec.cfg (None until the game is found),
+    /// and the last thing worth telling about it: (is an error, text).
+    pub qllog: Option<bool>,
+    pub qllog_note: Option<(bool, String)>,
     /// Linked x76 profile (public data, by handle) and its loading state.
     pub profile: Option<crate::profile::Profile>,
     pub profile_busy: bool,
@@ -346,6 +353,8 @@ impl Shared {
         let (state, load_warning) = load(&data_file);
         let fights_file = data_file.with_file_name("fights.json");
         let fights = crate::r5log::load(&fights_file);
+        let ql_fights_file = data_file.with_file_name("ql-fights.json");
+        let ql_fights = crate::r5log::load(&ql_fights_file);
         let server_file = data_file.with_file_name("servers.json");
         let server_history = crate::servers::load(&server_file);
         let token = data_file.parent().and_then(crate::discord::load_token);
@@ -361,6 +370,10 @@ impl Shared {
                 load_warning,
                 fights,
                 fights_file,
+                ql_fights,
+                ql_fights_file,
+                qllog: None,
+                qllog_note: None,
                 profile: None,
                 profile_busy: false,
                 profile_error: None,
@@ -529,6 +542,46 @@ impl Shared {
         added || rated
     }
 
+    /// Picks up new fights from Quake Live's console log. Returns true if there were any.
+    pub fn scan_ql(&self, tail: &mut crate::qllog::Tail) -> bool {
+        let (hint, recent) = {
+            let core = self.lock();
+            let since = now() - 3.0 * 86_400.0; // a log only lasts until the game restarts
+            let recent: Vec<_> = core.ql_fights.iter().filter(|f| f.t >= since).cloned().collect();
+            (core.setting_str("qlPath"), recent)
+        };
+        let new = crate::qllog::scan(tail, hint.as_deref(), &recent);
+        let mut core = self.lock();
+        if let Some(dir) = tail.home.as_ref().map(|d| d.display().to_string()) {
+            if hint.as_deref() != Some(dir.as_str()) {
+                core.set_setting("qlPath", dir.into()); // remember the account folder
+            }
+        }
+        let added = !new.is_empty();
+        core.ql_fights.extend(new);
+        core.ql_fights.sort_by(|a, b| a.t.total_cmp(&b.t));
+        let rated = core.rate_ql_fights();
+        if added || rated {
+            let file = core.ql_fights_file.clone();
+            crate::r5log::save(&file, &mut core.ql_fights);
+        }
+        added || rated
+    }
+
+    /// Reads whether autoexec.cfg turns Quake Live's console log on. Returns true if what the UI
+    /// shows changed.
+    pub fn check_ql_log(&self) -> bool {
+        let (dir, before) = {
+            let core = self.lock();
+            (core.setting_str("qlPath").map(PathBuf::from), core.qllog)
+        };
+        let Some(dir) = dir else { return false };
+        let on = crate::qllog::state(&dir);
+        let mut core = self.lock();
+        core.qllog = Some(on);
+        before != Some(on)
+    }
+
     /// Keeps the R5Reloaded patch the way it was set in Settings: with `fix`, puts it back when a
     /// game update replaced the patched script. Returns true if what the UI shows changed.
     pub fn check_r5_patch(&self, fix: bool) -> bool {
@@ -691,6 +744,38 @@ impl Core {
 
     /// Fills in the opponent's (and your) Elo, points, tier and rank for recent fights, from the
     /// last R5 ladder check. Fights are read within seconds, so that check is from before the fight.
+    /// The same for Quake Live, whose console log has names: an opponent is found by their ladder
+    /// name, then by an older name (colour codes don't count).
+    fn rate_ql_fights(&mut self) -> bool {
+        let Some(board) = self.boards.get(&Game::Ql).cloned() else { return false };
+        let plain = |n: &str| crate::qllog::plain(n).to_lowercase();
+        let mut by_name: HashMap<String, usize> = HashMap::new();
+        let mut by_alias: HashMap<String, usize> = HashMap::new();
+        // the ladder is best first, so where two players share a name the higher one wins
+        for (i, p) in board.players.iter().enumerate() {
+            by_name.entry(plain(&p.name)).or_insert(i);
+            for a in &p.aliases {
+                by_alias.entry(plain(a)).or_insert(i);
+            }
+        }
+        let cutoff = now() - 1800.0;
+        let mut changed = false;
+        for f in self.ql_fights.iter_mut().filter(|f| f.opp_elo.is_none() && f.t >= cutoff && !f.opponent.is_empty()) {
+            let key = plain(&f.opponent);
+            if let Some(&i) = by_name.get(&key).or_else(|| by_alias.get(&key)) {
+                let o = &board.players[i];
+                f.opp_id = Some(o.id.clone());
+                f.opp_elo = o.elo;
+                f.opp_points = o.points;
+                f.opp_tier = Some(o.tier.clone());
+                f.opp_rank = Some(o.rank);
+                f.my_elo = board.by_id.get(&f.me).and_then(|v| v.first()).and_then(|&j| board.players[j].elo);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     fn rate_fights(&mut self) -> bool {
         let Some(board) = self.boards.get(&Game::R5).cloned() else { return false };
         let find = |name: &str| -> Option<&Player> {
