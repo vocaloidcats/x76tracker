@@ -2,8 +2,8 @@
 
 use crate::tracker::{key_of, now, Core, Favorite, Game, Hit, Player, Snap};
 use crate::{
-    ChartData, ChartPoint, EventDetail, EventRow, FightDetail, GameData, GameRank, Opponent, PlayerCard, ProfileCard, SearchResult, StatChange,
-    Tick,
+    ChartData, ChartPoint, DiscordPage, EventDetail, EventRow, FightDetail, GameData, GameRank, Opponent, PlayerCard, ProfileCard, SearchResult,
+    ServerGame, ServerRow, ServersPage, StatChange, StaticText, Tick, WidgetSlot,
 };
 use chrono::{DateTime, Local, TimeZone};
 use slint::{Model, ModelRc, SharedString, VecModel};
@@ -593,6 +593,70 @@ pub fn game_data(core: &Core, game: Game, period: Period, ui: &UiState) -> GameD
     }
 }
 
+/// How far back Discord's "recent" numbers look.
+pub const RECENT_SECS: f64 = 48.0 * 3600.0;
+
+/// One tracked player's current numbers and their last 48 hours, for Discord (presence and widget).
+#[derive(Clone, Debug, Default)]
+pub struct PlayerStats {
+    pub rank: Option<i64>,
+    pub points: Option<i64>,
+    pub elo: Option<f64>,
+    pub tier: String,
+    pub kills: i64,
+    pub deaths: i64,
+    /// Change over the last 48 hours (or since tracking started, if that's more recent).
+    pub recent_elo: Option<f64>,
+    pub recent_points: Option<i64>,
+    pub recent_wins: i64,
+    pub recent_losses: i64,
+    /// The tier 48 hours ago (or when tracking started).
+    pub recent_tier_from: String,
+    pub peak_elo: Option<f64>,
+    /// Highest-rated opponent beaten in the last 48 hours (R5, from the game log).
+    pub best_win: Option<(String, f64)>,
+}
+
+pub fn player_stats(core: &Core, game: Game, id: &str) -> Option<PlayerStats> {
+    let key = key_of(game.id(), id);
+    let h: &[Snap] = core.state.history.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+    let live: Option<&Player> = core.latest.get(&key).and_then(Option::as_ref);
+    let last = h.last();
+    if live.is_none() && last.is_none() {
+        return None;
+    }
+    let points = live.and_then(|p| p.points).or_else(|| last.and_then(|s| s.points));
+    let elo = live.and_then(|p| p.elo).or_else(|| last.and_then(|s| s.elo));
+    let start = now() - RECENT_SECS;
+    let base = baseline(h, start);
+    let (wins, losses) = events(h, start).iter().fold((0, 0), |(w, l), e| (w + e.w, l + e.l));
+    let peak_elo = h.iter().filter_map(|s| s.elo).chain(elo).reduce(f64::max);
+    let best_win = if game == Game::R5 {
+        core.fights
+            .iter()
+            .filter(|f| f.kind == "kill" && f.t >= start && f.me.eq_ignore_ascii_case(id))
+            .filter_map(|f| f.opp_elo.map(|e| (f.opponent.clone(), e)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    } else {
+        None
+    };
+    Some(PlayerStats {
+        rank: live.map(|p| p.rank).or_else(|| last.and_then(|s| s.rank)),
+        points,
+        elo,
+        tier: live.map(|p| p.tier.clone()).or_else(|| last.map(|s| s.tier.clone())).unwrap_or_default(),
+        kills: live.map(|p| p.kills).or_else(|| last.map(|s| s.kills)).unwrap_or(0),
+        deaths: live.map(|p| p.deaths).or_else(|| last.map(|s| s.deaths)).unwrap_or(0),
+        recent_elo: base.and_then(|b| elo.zip(b.elo)).map(|(c, b)| c - b),
+        recent_points: base.and_then(|b| points.zip(b.points)).map(|(c, b)| c - b),
+        recent_wins: wins,
+        recent_losses: losses,
+        recent_tier_from: base.map(|b| b.tier.clone()).unwrap_or_default(),
+        peak_elo,
+        best_win,
+    })
+}
+
 pub fn results(hits: &[Hit]) -> ModelRc<SearchResult> {
     model(
         hits.iter()
@@ -817,6 +881,121 @@ pub fn profile_card(core: &Core, has_avatar: bool, has_banner: bool) -> ProfileC
     c
 }
 
+// ------------------------------------------------------------------ servers page
+/// Step chart of a whole-number series (player counts) over time.
+fn count_chart(pts: &[(f64, f64)], word: &str) -> Option<ChartData> {
+    if pts.len() < 2 {
+        return None;
+    }
+    let (t0, t1) = (pts[0].0, now().max(pts.last().unwrap().0 + 1.0));
+    let mut lo = pts.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+    let mut hi = pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+    if hi - lo < 4.0 {
+        let c = (hi + lo) / 2.0;
+        lo = c - 2.0;
+        hi = c + 2.0;
+    }
+    lo = (lo - (hi - lo) * 0.14).max(-0.5);
+    hi += (hi - lo) * 0.14;
+    let fx = |t: f64| ((t - t0) / (t1 - t0)) as f32;
+    let fy = |v: f64| (1.0 - (v - lo) / (hi - lo)) as f32;
+    let step = nice_step((hi - lo) / 3.0).max(1.0);
+    let mut ticks = Vec::new();
+    let mut v = (lo / step).ceil() * step;
+    while v <= hi {
+        ticks.push(Tick { y: fy(v), label: s(thousands(v.round() as i64)) });
+        v += step;
+    }
+    let points: Vec<ChartPoint> = pts
+        .iter()
+        .enumerate()
+        .map(|(i, &(t, v))| {
+            let (change, d) = if i == 0 { (String::new(), 0) } else { delta_text(false, Some(v - pts[i - 1].1), "", "no change") };
+            ChartPoint {
+                x: fx(t),
+                y: fy(v),
+                value: s(thousands(v.round() as i64)),
+                when: s(format!("at {}", clock_day(t)).to_uppercase()),
+                change: s(change),
+                dir: d,
+                sub: s(word),
+            }
+        })
+        .collect();
+    let lookup: Vec<i32> = (0..200)
+        .map(|b| {
+            let f = (b as f32 + 0.5) / 200.0;
+            points.iter().rposition(|p| p.x <= f).unwrap_or(0) as i32
+        })
+        .collect();
+    Some(ChartData {
+        ticks: model(ticks),
+        points: model(points),
+        lookup: model(lookup),
+        start: s(if is_today(t0) { clock(t0) } else { local(t0).format("%b %-d, %-I:%M %p").to_string() }),
+        span: s(span(t1 - t0)),
+    })
+}
+
+fn server_game(core: &Core, game: &str, label: &str, pick: fn(&crate::servers::Sample) -> i64) -> ServerGame {
+    let list: Vec<&crate::servers::Server> = core.servers.iter().filter(|x| x.game == game).collect();
+    let online: Vec<&&crate::servers::Server> = list.iter().filter(|x| x.online).collect();
+    let total: i64 = online.iter().map(|x| x.players).sum();
+    let slots: i64 = online.iter().map(|x| x.max).sum();
+    // today's peak, from the samples the app took
+    let midnight = local_midnight();
+    let peak = core.server_history.iter().filter(|x| x.t >= midnight).max_by_key(|x| pick(x));
+    // the chart covers the last day, from the most recent stretch the app was running without a gap
+    let day: Vec<&crate::servers::Sample> = core.server_history.iter().filter(|x| x.t >= now() - 86_400.0).collect();
+    let start = day.windows(2).rposition(|w| w[1].t - w[0].t > 600.0).map(|i| i + 1).unwrap_or(0);
+    let pts: Vec<(f64, f64)> = day[start..].iter().map(|x| (x.t, pick(x) as f64)).collect();
+    let chart = count_chart(&pts, "players");
+    let mut rows: Vec<ServerRow> = list
+        .iter()
+        .map(|x| ServerRow {
+            name: s(x.name.as_str()),
+            region: s(x.region.as_str()),
+            map: s(x.map.as_str()),
+            players: x.players as i32,
+            max: x.max as i32,
+            fill: if x.max > 0 { (x.players as f32 / x.max as f32).clamp(0.0, 1.0) } else { 0.0 },
+            online: x.online,
+        })
+        .collect();
+    // busiest first, offline last
+    rows.sort_by(|a, b| b.online.cmp(&a.online).then(b.players.cmp(&a.players)).then(a.region.cmp(&b.region)).then(a.name.cmp(&b.name)));
+    ServerGame {
+        label: s(label),
+        total: total as i32,
+        summary: s(if list.is_empty() {
+            "no servers listed".to_string()
+        } else {
+            format!("{} of {} servers online · {} / {} slots", online.len(), list.len(), thousands(total), thousands(slots))
+        }),
+        peak: s(peak.map(|x| thousands(pick(x))).unwrap_or_else(|| "–".into())),
+        peak_at: s(peak.map(|x| format!("at {}", clock(x.t))).unwrap_or_default()),
+        has_chart: chart.is_some(),
+        chart: chart.unwrap_or_default(),
+        rows: model(rows),
+    }
+}
+
+pub fn servers_page(core: &Core) -> ServersPage {
+    ServersPage {
+        loaded: core.servers_at.is_some(),
+        ql: server_game(core, crate::servers::QUAKE, "Quake Live", |x| x.ql),
+        r5: server_game(core, crate::servers::R5, "R5Reloaded", |x| x.r5),
+    }
+}
+
+pub fn servers_status(core: &Core) -> String {
+    match (&core.servers_error, core.servers_at) {
+        (Some(e), _) => format!("last check failed: {e}"),
+        (None, Some(t)) => format!("checked {} · every minute", ago(Some(t))),
+        (None, None) => "checking x76's servers…".into(),
+    }
+}
+
 // ------------------------------------------------------------------ status lines
 /// Top-bar status: (text, state) where state is 0 idle, 1 live, 2 checking, 3 error.
 pub fn live_status(core: &Core) -> (String, i32) {
@@ -850,4 +1029,141 @@ pub fn game_status(core: &Core, game: Game) -> (String, bool) {
         return ("loading ladder…".into(), false);
     }
     ("not checked until you track someone".into(), false)
+}
+
+// ------------------------------------------------------------------ settings: Discord
+fn slot_kind(kind: &str) -> i32 {
+    match kind {
+        "tile" => 0,
+        "image" => 2,
+        "card" => 3,
+        "progress" => 4,
+        _ => 1,
+    }
+}
+
+/// Tracked players of one game for the "your players" pickers: (names, chosen index).
+fn player_choices(core: &Core, cfg: &crate::discord::Config, game: Game) -> (Vec<String>, i32) {
+    let favs: Vec<&Favorite> = core.state.favorites.iter().filter(|f| f.game == game.id()).collect();
+    if favs.is_empty() {
+        return (vec![format!("No {} player tracked yet", game.label())], 0);
+    }
+    let chosen = cfg.player(core, game);
+    let i = favs.iter().position(|f| Some(&f.id) == chosen.as_ref()).unwrap_or(0);
+    (favs.iter().map(|f| f.name.clone()).collect(), i as i32)
+}
+
+pub fn discord_page(core: &Core) -> DiscordPage {
+    use crate::discord::{options, Config, APP_ID};
+    let cfg = Config::load(core);
+    let names = |kind: &str| model(options(kind).into_iter().map(|(_, m)| s(m)).collect());
+    let slots: Vec<WidgetSlot> = cfg
+        .layout
+        .iter()
+        .map(|slot| {
+            let source = cfg.source_of(slot);
+            WidgetSlot {
+                key: s(slot.key.as_str()),
+                kind: slot_kind(&slot.kind),
+                surface: s(slot.surface.as_str()),
+                name: s(slot.name.as_str()),
+                source: options(&slot.kind).iter().position(|(id, _)| *id == source).unwrap_or(0) as i32,
+                custom: s(cfg.custom_of(slot)),
+                is_custom: source == "custom",
+            }
+        })
+        .collect();
+    let statics: Vec<StaticText> = cfg
+        .statics
+        .iter()
+        .map(|f| StaticText { surface: s(f.surface.as_str()), name: s(f.name.as_str()), text: s(f.text.as_str()) })
+        .collect();
+    let (r5_names, r5_i) = player_choices(core, &cfg, Game::R5);
+    let (ql_names, ql_i) = player_choices(core, &cfg, Game::Ql);
+    let rpc_app = if cfg.rpc_app() == APP_ID {
+        "Shows as “Playing x76tracker”.".to_string()
+    } else {
+        let name = if cfg.widget_name.is_empty() { "your widget's app".to_string() } else { format!("your widget's app (“{}”)", cfg.widget_name) };
+        format!("Shows as {name}, so the widget's “while playing” panel appears with it. Change this on the Discord widget tab.")
+    };
+    DiscordPage {
+        rpc: cfg.rpc,
+        rpc_app: s(rpc_app),
+        players_r5: model(r5_names.into_iter().map(s).collect()),
+        player_r5: r5_i,
+        players_ql: model(ql_names.into_iter().map(s).collect()),
+        player_ql: ql_i,
+        widget: cfg.widget,
+        app_id: s(cfg.app_id.as_str()),
+        user_id: s(cfg.user_id.as_str()),
+        has_token: core.discord.token.is_some(),
+        widget_rpc: cfg.widget_rpc,
+        slots: model(slots),
+        statics: model(statics),
+        tile_options: names("tile"),
+        text_options: names("text"),
+        image_options: names("image"),
+        card_options: names("card"),
+        progress_options: names("progress"),
+    }
+}
+
+/// What each widget field would show right now (same order as the page's slots).
+pub fn discord_previews(core: &Core) -> ModelRc<SharedString> {
+    let cfg = crate::discord::Config::load(core);
+    model(cfg.layout.iter().map(|slot| s(crate::discord::preview(core, &cfg, slot))).collect())
+}
+
+pub struct DiscordStatus {
+    pub rpc: (String, i32),
+    pub widget: (String, i32),
+    /// (text, is_error, busy)
+    pub layout: (String, bool, bool),
+}
+
+/// Status lines for Rich Presence and the widget. State: 0 off, 1 waiting, 2 working, 3 problem.
+pub fn discord_status(core: &Core) -> DiscordStatus {
+    use crate::discord::{valid_id, Config};
+    let cfg = Config::load(core);
+    let d = &core.discord;
+    let rpc = if !cfg.rpc {
+        ("Off.".to_string(), 0)
+    } else if let Some(e) = &d.rpc_error {
+        (e.clone(), 3)
+    } else if d.rpc_showing {
+        let game = d.playing.map(Game::label).unwrap_or("your game");
+        let who = d.rpc_user.as_ref().map(|u| format!(" for {u}")).unwrap_or_default();
+        (format!("Showing {game} on Discord{who}."), 2)
+    } else if let Some(g) = d.playing {
+        (format!("{} is running; connecting to Discord…", g.label()), 1)
+    } else {
+        ("On. It appears once R5Reloaded or Quake Live is running.".to_string(), 1)
+    };
+    let widget = if !cfg.widget {
+        ("Off.".to_string(), 0)
+    } else if d.token.is_none() {
+        ("Paste your app's bot token above to start.".to_string(), 3)
+    } else if !valid_id(&cfg.app_id) {
+        ("Enter your app's Application ID above.".to_string(), 3)
+    } else if !valid_id(&cfg.user_id) {
+        ("Enter your Discord user ID above, or open Discord on this PC and x76tracker reads it from there.".to_string(), 3)
+    } else if cfg.layout.is_empty() {
+        ("Press Read widget layout.".to_string(), 3)
+    } else if let Some(e) = &d.error {
+        (e.clone(), 3)
+    } else if let Some(t) = d.ok_at {
+        (format!("Widget updated {}. The next update goes out when your numbers change.", ago(Some(t))), 2)
+    } else {
+        ("Sending the first update…".to_string(), 1)
+    };
+    let layout = match &d.layout_note {
+        _ if d.layout_busy => ("Reading the widget layout from Discord…".to_string(), false, true),
+        Some((err, text)) => (text.clone(), *err, false),
+        None if !cfg.layout.is_empty() => {
+            let name = if cfg.widget_name.is_empty() { "The widget".to_string() } else { format!("“{}”", cfg.widget_name) };
+            (format!("{name} has {} field(s) x76tracker can fill.", cfg.layout.len()), false, false)
+        }
+        None => (String::new(), false, false),
+    };
+    DiscordStatus { rpc, widget, layout }
 }

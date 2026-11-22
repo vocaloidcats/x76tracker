@@ -17,14 +17,33 @@ What you get:
 - **Chart:** points or Elo over time; hover it for exact values.
 - **Results list:** the elo and points change of each result.
 - **Live updates:** cards light up green or red when something changes.
+- **Servers tab:** live player counts on x76's Quake Live and R5Reloaded servers.
+
+## Discord (optional)
+
+Open **Settings** (the sliders button in the title bar).
+
+- **Rich Presence:** while R5Reloaded or Quake Live is running, your Discord status shows your tier, rank, Elo and today's record. Discord just has to be open on the same PC; there's no login.
+- **Profile widget:** for people who already have a Discord app with a profile widget (Discord no longer gives widgets to new apps). On the **Discord widget** tab, enter the app's Application ID and paste its bot token. x76tracker reads the widget's layout and fills each field set to *User Data* with a stat you pick (current numbers or the last 48 hours), at most every 5 minutes. In a *Collection* layout each item becomes a card with a picture: your x76 rank emblem, or an emoji that follows your results. The token is stored encrypted for your Windows account (`discord-token.bin`) and only sent to Discord.
 
 ## Options
 
 ```
 x76tracker.exe --data-dir D:\x76            keep history somewhere else
-x76tracker.exe --screenshot out.png [--size 1440x1000] [--light|--dark] [--hover x,y] [--offline]
+x76tracker.exe --screenshot out.png [--size 1440x1000] [--light|--dark] [--hover x,y] [--click x,y] [--offline]
+               [--tab servers] [--settings general|widget]
                                             draw the window into a PNG without showing it
 ```
+
+## Verify your download
+
+Release builds are made by this repository's GitHub Actions workflow ([`.github/workflows/build.yml`](.github/workflows/build.yml)) on GitHub's own machines, not on anyone's PC. Each one comes with a signed build attestation. With the [GitHub CLI](https://cli.github.com):
+
+```
+gh attestation verify x76tracker.exe --repo vocaloidcats/x76tracker
+```
+
+This confirms the file was built by that workflow from this repository, and names the exact commit. Without the CLI, compare `Get-FileHash x76tracker.exe` with the `x76tracker.exe.sha256` file on the release page.
 
 ## Build
 
@@ -41,6 +60,9 @@ This produces `target\release\x76tracker.exe`.
 | `src/tracker.rs` | Downloads the ladders, saves change history, search. |
 | `src/view.rs` | Turns history into cards, charts and status lines (Today / Last 24h / All tracked). |
 | `src/main.rs` | Window, button handlers, the background check loop, single-instance check. |
+| `src/servers.rs` | x76's server list and the player-count history for the Servers tab. |
+| `src/discord.rs` | Discord settings, the profile widget's layout and updates, the encrypted bot token. |
+| `src/rpc.rs` | Rich Presence through Discord's local pipe, and spotting when a game is running. |
 | `ui/app.slint` | The UI, styled after x76.gg: Archivo and IBM Plex Mono, paper/ink colours, tier colours. |
 
 The app draws its window with Slint's software renderer. Slint's GPU renderer placed some letters a pixel off the line.
@@ -50,3 +72,4 @@ The app draws its window with Slint's software renderer. Slint's GPU renderer pl
 - **The app:** MIT, see `LICENSE`.
 - **Slint:** used under its free Royalty-free License for desktop apps. That license requires a visible Slint credit; the app shows "Made with Slint" at the bottom of the window.
 - **Fonts:** Archivo and IBM Plex Mono are under the SIL Open Font License; the license files are in `ui/fonts/`.
+- **Widget pictures:** the emoji are Microsoft's [Fluent Emoji](https://github.com/microsoft/fluentui-emoji) (MIT), and the rank emblems are x76.gg's own artwork. Neither is bundled: Discord loads them from those sites.

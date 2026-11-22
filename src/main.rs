@@ -4,14 +4,18 @@
 //!   x76tracker.exe                            normal start
 //!   x76tracker.exe --data-dir D:\x76          keep history somewhere else
 //!   x76tracker.exe --screenshot out.png [--size 1440x1000] [--light|--dark] [--hover x,y] [--offline]
+//!                  [--tab servers] [--settings general|widget]
 //!                                             render the window to a PNG without showing it
 #![windows_subsystem = "windows"]
 
 slint::include_modules!();
 
+mod discord;
 mod profile;
 mod r5log;
 mod ranks;
+mod rpc;
+mod servers;
 mod tracker;
 mod view;
 
@@ -30,6 +34,8 @@ thread_local! {
     static UI: RefCell<UiState> = RefCell::new(UiState::default());
     // whether profile pictures are loaded: (avatar, banner)
     static PICS: RefCell<(bool, bool)> = const { RefCell::new((false, false)) };
+    // what the Discord settings page was last built from (see set_discord_page)
+    static DISCORD_SIG: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 type Pixels = Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>>;
@@ -138,14 +144,52 @@ fn refresh(app: &AppWindow, shared: &Shared) {
         app.set_r5(view::game_data(&core, Game::R5, period, &ui));
         ui.flash.clear();
     });
+    app.set_servers(view::servers_page(&core));
     let (has_avatar, has_banner) = PICS.with(|p| *p.borrow());
     app.set_profile(view::profile_card(&core, has_avatar, has_banner));
     let open_detail = UI.with(|ui| ui.borrow().detail.clone());
     app.set_detail(open_detail.and_then(|(key, id)| view::event_detail(&core, &key, &id)).unwrap_or_default());
     app.set_period(period.index());
     app.set_interval_idx(INTERVALS.iter().position(|&i| i == core.interval()).unwrap_or(1) as i32);
+    set_discord_page(app, &core, false);
     drop(core);
     tick(app, shared);
+}
+
+/// The Discord settings page. Its rows are only rebuilt when something other than a custom text
+/// changed: rebuilding them while someone types would drop the cursor.
+fn set_discord_page(app: &AppWindow, core: &tracker::Core, force: bool) {
+    let mut cfg = discord::Config::load(core);
+    cfg.custom.clear();
+    let favs: Vec<(&str, &str, &str)> = core.state.favorites.iter().map(|f| (f.game.as_str(), f.id.as_str(), f.name.as_str())).collect();
+    let sig = format!("{}|{}|{favs:?}", serde_json::to_string(&cfg).unwrap_or_default(), core.discord.token.is_some());
+    let changed = DISCORD_SIG.with(|s| {
+        let mut s = s.borrow_mut();
+        let changed = force || *s != sig;
+        *s = sig;
+        changed
+    });
+    if changed {
+        app.set_discord(view::discord_page(core));
+    }
+    app.set_discord_previews(view::discord_previews(core));
+}
+
+/// Changes the Discord settings (saved) and the unsaved Discord state together.
+fn edit_discord(shared: &Shared, f: impl FnOnce(&mut discord::Config, &mut discord::Live)) {
+    let mut core = shared.lock();
+    let mut cfg = discord::Config::load(&core);
+    f(&mut cfg, &mut core.discord);
+    cfg.save(&mut core);
+}
+
+/// Reads the widget's layout from Discord in the background, then redraws.
+fn read_layout_bg(app: &AppWindow, shared: &Arc<Shared>) {
+    let (weak, shared) = (app.as_weak(), shared.clone());
+    std::thread::spawn(move || {
+        discord::refresh_layout(&shared);
+        let _ = weak.upgrade_in_event_loop(move |app| refresh(&app, &shared));
+    });
 }
 
 /// Cheap per-second update of the "live · 12s ago" and per-game status lines.
@@ -162,6 +206,15 @@ fn tick(app: &AppWindow, shared: &Shared) {
     let (t, e) = view::game_status(&core, Game::R5);
     app.set_r5_status(t.into());
     app.set_r5_status_error(e);
+    app.set_servers_status(view::servers_status(&core).into());
+    let d = view::discord_status(&core);
+    app.set_rpc_status(d.rpc.0.into());
+    app.set_rpc_state(d.rpc.1);
+    app.set_widget_status(d.widget.0.into());
+    app.set_widget_state(d.widget.1);
+    app.set_layout_status(d.layout.0.into());
+    app.set_layout_error(d.layout.1);
+    app.set_layout_busy(d.layout.2);
 }
 
 fn set_results(app: &AppWindow, game: Game, hits: &[Hit], msg: &str) {
@@ -435,6 +488,211 @@ fn wire(app: &AppWindow, shared: &Arc<Shared>) {
             }
         }
     });
+
+    // ---------------------------------------------------------- settings: Discord
+    actions.on_settings_opened({
+        let (w, s) = ctx!();
+        move || {
+            if let Some(app) = w.upgrade() {
+                set_discord_page(&app, &s.lock(), true);
+                tick(&app, &s);
+            }
+        }
+    });
+    actions.on_rpc({
+        let (w, s) = ctx!();
+        move |on| {
+            edit_discord(&s, |c, live| {
+                c.rpc = on;
+                live.rpc_error = None;
+            });
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_player({
+        let (w, s) = ctx!();
+        move |game, i| {
+            let Some(g) = Game::from_id(&game) else { return };
+            let id = s.lock().state.favorites.iter().filter(|f| f.game == g.id()).nth(i.max(0) as usize).map(|f| f.id.clone());
+            if let Some(id) = id {
+                edit_discord(&s, |c, live| {
+                    match g {
+                        Game::R5 => c.r5_player = id,
+                        Game::Ql => c.ql_player = id,
+                    }
+                    live.soon = Some(now() + 2.0);
+                });
+            }
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_discord_id({
+        let (w, s) = ctx!();
+        move |which, value| {
+            let v: String = value.chars().filter(char::is_ascii_digit).collect();
+            let mut reread = false;
+            edit_discord(&s, |c, live| {
+                if which == "app" {
+                    if c.app_id != v {
+                        // another app: its widget has its own layout
+                        c.app_id = v.clone();
+                        c.layout.clear();
+                        c.statics.clear();
+                        c.widget_name.clear();
+                        live.sent.clear();
+                        live.layout_note = None;
+                        reread = discord::valid_id(&v) && live.token.is_some();
+                    }
+                } else if c.user_id != v {
+                    c.user_id = v.clone();
+                    live.soon = Some(now() + 2.0);
+                }
+            });
+            if let Some(app) = w.upgrade() {
+                if reread {
+                    read_layout_bg(&app, &s);
+                }
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_discord_token({
+        let (w, s) = ctx!();
+        move |t| {
+            let token = discord::clean_token(&t);
+            let looks_ok = token.len() >= 50 && token.matches('.').count() == 2 && !token.contains(char::is_whitespace);
+            let dir = s.lock().data_file.parent().map(Path::to_path_buf);
+            let result = if !looks_ok {
+                Err("That doesn't look like a bot token. Copy it again from Developer Portal → your app → Bot.".to_string())
+            } else {
+                dir.ok_or_else(|| "No folder to save it in.".to_string()).and_then(|d| discord::save_token(&d, &token))
+            };
+            let mut reread = false;
+            {
+                let mut core = s.lock();
+                match result {
+                    Ok(()) => {
+                        core.discord.token = Some(token);
+                        core.discord.error = None;
+                        core.discord.layout_note = None;
+                        reread = discord::valid_id(&discord::Config::load(&core).app_id);
+                    }
+                    Err(e) => core.discord.layout_note = Some((true, e)),
+                }
+            }
+            if let Some(app) = w.upgrade() {
+                if reread {
+                    read_layout_bg(&app, &s);
+                }
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_discord_token_clear({
+        let (w, s) = ctx!();
+        move || {
+            {
+                let mut core = s.lock();
+                if let Some(d) = core.data_file.parent() {
+                    discord::clear_token(d);
+                }
+                core.discord.token = None;
+                core.discord.sent.clear();
+            }
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_widget({
+        let (w, s) = ctx!();
+        move |on| {
+            let mut reread = false;
+            edit_discord(&s, |c, live| {
+                c.widget = on;
+                if on {
+                    live.soon = Some(now());
+                    live.error = None;
+                    reread = c.layout.is_empty() && discord::valid_id(&c.app_id) && live.token.is_some();
+                }
+            });
+            if let Some(app) = w.upgrade() {
+                if reread {
+                    read_layout_bg(&app, &s);
+                }
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_widget_rpc({
+        let (w, s) = ctx!();
+        move |on| {
+            edit_discord(&s, |c, _| c.widget_rpc = on);
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_widget_layout({
+        let (w, s) = ctx!();
+        move || {
+            if let Some(app) = w.upgrade() {
+                read_layout_bg(&app, &s);
+                tick(&app, &s);
+            }
+        }
+    });
+    actions.on_widget_source({
+        let (w, s) = ctx!();
+        move |key, kind, i| {
+            let kind = match kind {
+                0 => "tile",
+                2 => "image",
+                3 => "card",
+                4 => "progress",
+                _ => "text",
+            };
+            if let Some((id, _)) = discord::options(kind).into_iter().nth(i.max(0) as usize) {
+                edit_discord(&s, |c, live| {
+                    c.sources.insert(key.to_string(), id);
+                    live.soon = Some(now() + 2.0);
+                });
+            }
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
+    actions.on_widget_custom({
+        let (w, s) = ctx!();
+        move |key, text| {
+            edit_discord(&s, |c, live| {
+                c.custom.insert(key.to_string(), text.to_string());
+                live.soon = Some(now() + 8.0); // after they stop typing
+            });
+            if let Some(app) = w.upgrade() {
+                tick(&app, &s);
+            }
+        }
+    });
+    actions.on_widget_now({
+        let (w, s) = ctx!();
+        move || {
+            s.lock().discord.soon = Some(now());
+            if let Some(app) = w.upgrade() {
+                tick(&app, &s);
+            }
+        }
+    });
+    actions.on_open_url(|url| {
+        if url.starts_with("https://discord.com/") {
+            let _ = std::process::Command::new("explorer").arg(url.as_str()).spawn();
+        }
+    });
 }
 
 /// Custom title bar: native drag (with Windows snapping), minimize/maximize/close, edge resizing.
@@ -476,7 +734,14 @@ fn wire_window(app: &AppWindow) {
             if let Some(app) = w.upgrade() {
                 let _ = app.window().hide();
             }
+            // quit outright: an opened dropdown can keep Slint's loop alive after the window hides
+            let _ = slint::quit_event_loop();
         }
+    });
+    // the same when Windows asks the window to close (taskbar, Alt+F4)
+    app.window().on_close_requested(|| {
+        let _ = slint::quit_event_loop();
+        slint::CloseRequestResponse::HideWindow
     });
     ctl.on_resize(move |direction| {
         let Some(app) = w.upgrade() else { return };
@@ -626,6 +891,12 @@ mod screenshot {
         pub offline: bool,
         /// open the detail panel on the newest R5 result that has fights in it
         pub detail: bool,
+        /// show the Servers tab
+        pub servers_tab: bool,
+        /// open Settings on this tab (0 general, 1 Discord widget)
+        pub settings: Option<i32>,
+        /// click here before the final frame (e.g. to open a dropdown)
+        pub click: Option<(f32, f32)>,
     }
 
     pub fn run(data_file: PathBuf, o: Options) -> Result<(), Box<dyn std::error::Error>> {
@@ -634,6 +905,7 @@ mod screenshot {
         let shared = Shared::new(data_file);
         if !o.offline {
             shared.poll_once(&|_| {});
+            shared.poll_servers();
         }
         shared.scan_r5(&mut r5log::Tail::default());
         let saved_handle = shared.lock().setting_str("x76Handle");
@@ -642,6 +914,13 @@ mod screenshot {
         wire(&app, &shared);
         startup(&app, &shared);
         app.invoke_set_dark(o.theme.unwrap_or(true));
+        if o.servers_tab {
+            app.set_tab(1);
+        }
+        if let Some(t) = o.settings {
+            app.set_settings_open(true);
+            app.set_settings_tab(t);
+        }
         if o.detail {
             let core = shared.lock();
             if let Some(f) = core.state.favorites.iter().find(|f| f.game == "r5") {
@@ -665,6 +944,15 @@ mod screenshot {
         app.show()?;
         let mut buf = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
         for pass in 0..3 {
+            if pass == 1 {
+                if let Some((x, y)) = o.click {
+                    let position = slint::LogicalPosition::new(x, y);
+                    let button = slint::platform::PointerEventButton::Left;
+                    app.window().dispatch_event(WindowEvent::PointerMoved { position });
+                    app.window().dispatch_event(WindowEvent::PointerPressed { position, button });
+                    app.window().dispatch_event(WindowEvent::PointerReleased { position, button });
+                }
+            }
             if pass == 2 {
                 if let Some((x, y)) = o.hover {
                     app.window().dispatch_event(WindowEvent::PointerMoved { position: slint::LogicalPosition::new(x, y) });
@@ -715,6 +1003,9 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 hover: arg_value(&args, "--hover").and_then(|v| pair(&v, ',')),
                 offline: args.iter().any(|a| a == "--offline"),
                 detail: args.iter().any(|a| a == "--detail"),
+                servers_tab: arg_value(&args, "--tab").as_deref() == Some("servers"),
+                settings: arg_value(&args, "--settings").map(|v| if v == "widget" { 1 } else { 0 }),
+                click: arg_value(&args, "--click").and_then(|v| pair(&v, ',')),
             },
         );
     }
@@ -773,6 +1064,48 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 let _ = r5_weak.upgrade_in_event_loop(move |app| refresh(&app, &s));
             }
             std::thread::sleep(Duration::from_secs(2));
+        }
+    });
+
+    // x76's servers: player counts every minute (a tiny request), recorded for the Servers tab
+    let (sv_shared, sv_weak) = (shared.clone(), app.as_weak());
+    std::thread::spawn(move || loop {
+        if sv_shared.poll_servers() {
+            let s = sv_shared.clone();
+            let _ = sv_weak.upgrade_in_event_loop(move |app| refresh(&app, &s));
+        }
+        std::thread::sleep(Duration::from_secs(60));
+    });
+
+    // Discord Rich Presence: only while a game runs and it's switched on in Settings
+    let (rp_shared, rp_weak) = (shared.clone(), app.as_weak());
+    std::thread::spawn(move || {
+        let s = rp_shared.clone();
+        rpc::run(rp_shared, move || {
+            let s = s.clone();
+            let _ = rp_weak.upgrade_in_event_loop(move |app| tick(&app, &s));
+        })
+    });
+
+    // Discord profile widget (for apps that have one): new values when they change
+    let (wd_shared, wd_weak) = (shared.clone(), app.as_weak());
+    std::thread::spawn(move || {
+        let ready = {
+            let core = wd_shared.lock();
+            let c = discord::Config::load(&core);
+            c.widget && discord::valid_id(&c.app_id) && core.discord.token.is_some()
+        };
+        if ready {
+            discord::refresh_layout(&wd_shared); // keep the field list in step with the widget editor
+            let s = wd_shared.clone();
+            let _ = wd_weak.upgrade_in_event_loop(move |app| refresh(&app, &s));
+        }
+        loop {
+            if discord::widget_step(&wd_shared) {
+                let s = wd_shared.clone();
+                let _ = wd_weak.upgrade_in_event_loop(move |app| tick(&app, &s));
+            }
+            std::thread::sleep(Duration::from_secs(3));
         }
     });
 

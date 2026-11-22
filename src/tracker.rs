@@ -313,6 +313,14 @@ pub struct Core {
     pub profile: Option<crate::profile::Profile>,
     pub profile_busy: bool,
     pub profile_error: Option<String>,
+    /// x76's game servers (latest check) and the sampled player totals (servers.json).
+    pub servers: Vec<crate::servers::Server>,
+    pub servers_at: Option<f64>,
+    pub servers_error: Option<String>,
+    pub server_history: Vec<crate::servers::Sample>,
+    pub server_file: PathBuf,
+    /// Rich Presence and widget state that isn't saved (the token, what was sent, errors).
+    pub discord: crate::discord::Live,
 }
 
 pub struct Shared {
@@ -328,6 +336,9 @@ impl Shared {
         let (state, load_warning) = load(&data_file);
         let fights_file = data_file.with_file_name("fights.json");
         let fights = crate::r5log::load(&fights_file);
+        let server_file = data_file.with_file_name("servers.json");
+        let server_history = crate::servers::load(&server_file);
+        let token = data_file.parent().and_then(crate::discord::load_token);
         Arc::new(Shared {
             core: Mutex::new(Core {
                 state,
@@ -343,6 +354,12 @@ impl Shared {
                 profile: None,
                 profile_busy: false,
                 profile_error: None,
+                servers: Vec::new(),
+                servers_at: None,
+                servers_error: None,
+                server_history,
+                server_file,
+                discord: crate::discord::Live { token, ..Default::default() },
             }),
             wake: Mutex::new(false),
             wake_cv: Condvar::new(),
@@ -441,6 +458,33 @@ impl Shared {
         core.next_poll = Some(now() + core.interval() as f64);
         drop(core);
         notify(true);
+    }
+
+    /// Checks x76's server list and records the player totals. Returns true on success.
+    pub fn poll_servers(&self) -> bool {
+        let result = crate::servers::fetch();
+        let mut core = self.lock();
+        match result {
+            Ok(list) => {
+                let t = now();
+                let sample = crate::servers::Sample {
+                    t: (t * 10.0).round() / 10.0,
+                    ql: crate::servers::total(&list, crate::servers::QUAKE),
+                    r5: crate::servers::total(&list, crate::servers::R5),
+                };
+                core.servers = list;
+                core.servers_at = Some(t);
+                core.servers_error = None;
+                core.server_history.push(sample);
+                let file = core.server_file.clone();
+                crate::servers::save(&file, &mut core.server_history);
+                true
+            }
+            Err(e) => {
+                core.servers_error = Some(e);
+                false
+            }
+        }
     }
 
     /// Picks up new fights from R5Reloaded's log. Returns true if there were any.
