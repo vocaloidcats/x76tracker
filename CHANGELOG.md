@@ -31,7 +31,7 @@ Each version's section is shown in the app (What's new) and used as its GitHub r
 
 ### Fixed
 
-- **Sharper pictures in What's new:** they're resized smoothly to the exact size they're shown at. Before, shrinking them dropped pixels, which made their text look thin and jagged. In the picture, the top half is before the fix and the bottom half is now.
+- **Sharper pictures:** rank emblems, your avatar and banner, and the pictures in What's new are resized smoothly to the exact size they're shown at, in the app and in saved share cards. Before, shrinking them dropped pixels, so emblems looked grainy and text in pictures looked thin and jagged. In the picture, the top half is before the fix and the bottom half is now.
   ![The same part of a picture twice: on top, thin broken letters and a jagged emblem; below, smooth and even](docs/changelog/2.3.0-sharp-pictures.png)
 
 ## 2.2.2

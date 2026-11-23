@@ -345,18 +345,41 @@ export global RankIcons {
     in property <bool> ready;
 }
 
+// Pictures resampled by x76tracker to the exact pixel size they're drawn at. Slint's software
+// renderer shrinks an image by taking the nearest pixel, which leaves emblems and photos grainy.
+// Each place that draws one asks for its size until the copy it has was made for that size; the
+// original stands in meanwhile.
+export global Sharp {
+    // rank emblems by physical size in pixels, then tier (empty until asked for)
+    in property <[[image]]> icons;
+    callback want-icon(px: int);
+    // avatar and banner per use: 0 profile banner, 1 profile avatar, 2 share card banner,
+    // 3 share card avatar; made: the size each copy was made for, as width * 65536 + height
+    in property <[image]> pictures;
+    in property <[int]> made;
+    callback want(use: int, width: int, height: int);
+}
+
 // Tier marker: x76's emblem when loaded, otherwise a diamond in the tier colour
 component Gem inherits Rectangle {
     in property <int> tier-key;
     in property <length> size: 22px;
     property <bool> art: RankIcons.ready && root.tier-key >= 0 && root.tier-key < RankIcons.icons.length;
+    // the emblem resampled to this size, once x76tracker has made it (see Sharp)
+    property <int> px: round(root.size / 1phx);
+    property <bool> sharp: Sharp.icons[root.px].length > root.tier-key;
     width: root.size;
     height: root.size;
     if root.art: Image {
         width: root.size;
         height: root.size;
-        source: RankIcons.icons[root.tier-key];
+        source: root.sharp ? Sharp.icons[root.px][root.tier-key] : RankIcons.icons[root.tier-key];
         image-fit: contain;
+    }
+    Timer {
+        interval: 120ms;
+        running: root.art && !root.sharp;
+        triggered => { Sharp.want-icon(root.px); }
     }
     if !root.art: Path {
         x: (root.size - self.width) / 2;
@@ -1208,6 +1231,27 @@ component RankTile inherits Rectangle {
     }
 }
 
+// A picture drawn from a copy x76tracker resampled to exactly this size and cropped like
+// image-fit: cover (see Sharp). Until that copy is ready the original stands in.
+component SharpPicture inherits Rectangle {
+    in property <int> use;
+    in property <image> original;
+    property <int> want-w: round(root.width / 1phx);
+    property <int> want-h: round(root.height / 1phx);
+    property <bool> fresh: root.want-w > 0 && root.want-h > 0 && Sharp.made[root.use] == root.want-w * 65536 + root.want-h;
+    Image {
+        width: root.width;
+        height: root.height;
+        source: root.fresh ? Sharp.pictures[root.use] : root.original;
+        image-fit: cover;
+    }
+    Timer {
+        interval: 250ms;
+        running: root.want-w > 0 && root.want-h > 0 && !root.fresh && root.original.width > 0;
+        triggered => { Sharp.want(root.use, root.want-w, root.want-h); }
+    }
+}
+
 component ProfileCardView inherits Rectangle {
     in property <ProfileCard> p;
     in property <image> avatar;
@@ -1217,11 +1261,11 @@ component ProfileCardView inherits Rectangle {
     border-radius: 16px;
     clip: true;
     background: Theme.surface-2;
-    if root.img: Image {
+    if root.img: SharpPicture {
         width: root.width;
         height: root.height;
-        source: root.banner;
-        image-fit: cover;
+        use: 0;
+        original: root.banner;
     }
     // darken the banner behind the text so it stays readable
     if root.img: Rectangle {
@@ -1238,13 +1282,13 @@ component ProfileCardView inherits Rectangle {
                 height: 88px;
                 border-radius: 44px;
                 background: root.img ? #ffffff38 : Theme.surface;
-                if root.p.has-avatar: Image {
+                if root.p.has-avatar: SharpPicture {
                     x: 4px;
                     y: 4px;
                     width: 80px;
                     height: 80px;
-                    source: root.avatar;
-                    image-fit: cover;
+                    use: 1;
+                    original: root.avatar;
                 }
                 if !root.p.has-avatar: Text {
                     text: root.p.initial;
@@ -1447,7 +1491,7 @@ component ShareCardView inherits Rectangle {
         height: root.strip;
         clip: true;
         background: @linear-gradient(135deg, #2f2b29 0%, #1d1c1f 100%);
-        if root.c.has-banner: Image { width: parent.width; height: parent.height; source: root.banner; image-fit: cover; }
+        if root.c.has-banner: SharpPicture { width: parent.width; height: parent.height; use: 2; original: root.banner; }
         Rectangle { background: @linear-gradient(180deg, #18171a00 45%, #18171a 100%); }
         // brand, top right
         Rectangle {
@@ -1492,7 +1536,7 @@ component ShareCardView inherits Rectangle {
             height: 82px;
             border-radius: 41px;
             background: #ffffff26;
-            if root.c.has-avatar: Image { width: parent.width; height: parent.height; source: root.avatar; image-fit: cover; }
+            if root.c.has-avatar: SharpPicture { width: parent.width; height: parent.height; use: 3; original: root.avatar; }
             if !root.c.has-avatar: Text {
                 text: root.c.initial;
                 font-size: 32px;

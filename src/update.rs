@@ -479,31 +479,58 @@ pub struct Frames {
 /// see-through edges of a picture don't pick up dark fringes). Used to draw What's new pictures at
 /// exactly their on-screen size: the software renderer itself scales by taking the nearest pixel.
 pub fn resample(f: &Frames, w: u32, h: u32) -> Vec<Vec<u8>> {
-    f.frames
-        .iter()
-        .map(|px| {
-            let mut pre = px.clone();
-            for p in pre.chunks_exact_mut(4) {
-                let a = p[3] as u32;
-                for c in &mut p[..3] {
-                    *c = ((*c as u32 * a + 127) / 255) as u8;
-                }
-            }
-            let Some(img) = image::RgbaImage::from_raw(f.width, f.height, pre) else {
-                return vec![0; (w * h * 4) as usize];
-            };
-            let out = image::imageops::resize(&img, w.max(1), h.max(1), image::imageops::FilterType::CatmullRom);
-            let mut raw = out.into_raw();
-            // filter overshoot can leave a colour brighter than its alpha allows; keep it valid
-            for p in raw.chunks_exact_mut(4) {
-                let a = p[3];
-                for c in &mut p[..3] {
-                    *c = (*c).min(a);
-                }
-            }
-            raw
-        })
-        .collect()
+    f.frames.iter().map(|px| resize_premul(px, f.width, f.height, w, h)).collect()
+}
+
+/// Straight-alpha RGBA (`w` × `h`) resized to `tw` × `th` with a Catmull-Rom filter, returned as
+/// premultiplied RGBA.
+pub fn resize_premul(rgba: &[u8], w: u32, h: u32, tw: u32, th: u32) -> Vec<u8> {
+    let (tw, th) = (tw.max(1), th.max(1));
+    let mut pre = rgba.to_vec();
+    for p in pre.chunks_exact_mut(4) {
+        let a = p[3] as u32;
+        for c in &mut p[..3] {
+            *c = ((*c as u32 * a + 127) / 255) as u8;
+        }
+    }
+    let Some(img) = image::RgbaImage::from_raw(w, h, pre) else {
+        return vec![0; (tw * th * 4) as usize];
+    };
+    let mut raw = image::imageops::resize(&img, tw, th, image::imageops::FilterType::CatmullRom).into_raw();
+    // filter overshoot can leave a colour brighter than its alpha allows; keep it valid
+    for p in raw.chunks_exact_mut(4) {
+        let a = p[3];
+        for c in &mut p[..3] {
+            *c = (*c).min(a);
+        }
+    }
+    raw
+}
+
+/// Cut to the shape of `tw` × `th` from the middle (what image-fit: cover shows), then resized to
+/// exactly that, premultiplied.
+pub fn cover(rgba: &[u8], w: u32, h: u32, tw: u32, th: u32) -> Vec<u8> {
+    let (tw, th) = (tw.max(1), th.max(1));
+    let (cw, ch) = if w as u64 * th as u64 > h as u64 * tw as u64 {
+        (((h as u64 * tw as u64) / th as u64).clamp(1, w as u64) as u32, h)
+    } else {
+        (w, ((w as u64 * th as u64) / tw as u64).clamp(1, h as u64) as u32)
+    };
+    let (x0, y0) = ((w - cw) / 2, (h - ch) / 2);
+    let mut crop = Vec::with_capacity((cw * ch * 4) as usize);
+    for y in y0..y0 + ch {
+        let start = ((y * w + x0) * 4) as usize;
+        crop.extend_from_slice(&rgba[start..start + (cw * 4) as usize]);
+    }
+    resize_premul(&crop, cw, ch, tw, th)
+}
+
+/// Resized to fit a `px` × `px` square, keeping its shape (what image-fit: contain shows):
+/// the new width and height, and premultiplied pixels.
+pub fn fit(rgba: &[u8], w: u32, h: u32, px: u32) -> (u32, u32, Vec<u8>) {
+    let k = px as f64 / w.max(h).max(1) as f64;
+    let (tw, th) = (((w as f64 * k).round() as u32).max(1), ((h as f64 * k).round() as u32).max(1));
+    (tw, th, resize_premul(rgba, w, h, tw, th))
 }
 
 /// Decodes a PNG or an animated PNG (APNG); anything else the image library reads works as a still.
@@ -560,6 +587,22 @@ mod tests {
         // premultiplied: the see-through side has no colour, and nothing outshines its alpha
         assert_eq!(&out[1][12..], &[0, 0, 0, 0]);
         assert!(out.iter().flat_map(|f| f.chunks(4)).all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]));
+    }
+
+    #[test]
+    fn cover_and_fit_shapes() {
+        // 6×2: red, green, blue column pairs; cut to a square from the middle it's all green
+        let (r, g, b) = ([255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]);
+        let row = [r, r, g, g, b, b].concat();
+        let px = [row.clone(), row].concat();
+        let out = cover(&px, 6, 2, 1, 1);
+        assert_eq!(out, vec![0, 255, 0, 255]);
+        // a 6×2 picture in a 3×3 square keeps its shape: 3×1
+        let (w, h, out) = fit(&px, 6, 2, 3);
+        assert_eq!((w, h, out.len()), (3, 1, 12));
+        // the middle is the green pair, with a little of its neighbours blended in
+        let mid = &out[4..8];
+        assert!(mid[1] > 200 && mid[0] < 40 && mid[2] < 40 && mid[3] == 255, "{mid:?}");
     }
 
     #[test]

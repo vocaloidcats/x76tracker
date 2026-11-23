@@ -56,6 +56,135 @@ thread_local! {
     static MEDIA: RefCell<std::collections::HashMap<String, MediaSlot>> = RefCell::new(std::collections::HashMap::new());
     // resample pictures right away instead of in the background (screenshot mode has no event loop to hand results to)
     static MEDIA_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // Sharp pictures (see `Sharp` in app.slint): the rank emblems as loaded, per tier, and their
+    // resampled copies by physical size (one model, shared by every window that shows emblems)
+    static ICON_SRC: RefCell<Vec<Pixels>> = const { RefCell::new(Vec::new()) };
+    static ICON_PX: std::rc::Rc<slint::VecModel<slint::ModelRc<slint::Image>>> = std::rc::Rc::new(slint::VecModel::default());
+    // avatar and banner as loaded, their copies per use, the size each copy was made for, a
+    // resample running per use, and a count that goes up when new pictures arrive
+    static PIC_SRC: RefCell<(Pixels, Pixels)> = const { RefCell::new((None, None)) };
+    static PIC_OUT: std::rc::Rc<slint::VecModel<slint::Image>> = std::rc::Rc::new(slint::VecModel::from(vec![slint::Image::default(); 4]));
+    static PIC_MADE: std::rc::Rc<slint::VecModel<i32>> = std::rc::Rc::new(slint::VecModel::from(vec![0; 4]));
+    static PIC_BUSY: std::cell::Cell<[bool; 4]> = const { std::cell::Cell::new([false; 4]) };
+    static PIC_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Keeps the rank emblems as loaded (for resampling) and forgets the old resampled sizes;
+/// returns the emblems as images, per tier.
+fn keep_icons(icons: Vec<Pixels>) -> Vec<slint::Image> {
+    let images = icons.iter().map(|px| px.clone().map(slint::Image::from_rgba8).unwrap_or_default()).collect();
+    ICON_SRC.with(|s| *s.borrow_mut() = icons);
+    ICON_PX.with(|m| m.set_vec(Vec::new()));
+    images
+}
+
+/// Gives a window's Sharp global the shared resampled emblems and answers its requests.
+fn hook_sharp_icons(sharp: &Sharp<'_>) {
+    sharp.set_icons(ICON_PX.with(|m| slint::ModelRc::from(m.clone())));
+    sharp.on_want_icon(want_icon);
+}
+
+/// Every tier's emblem resampled to fit `px` × `px` physical pixels (quick: done right away).
+fn want_icon(px: i32) {
+    use slint::Model;
+    if !(1..=1024).contains(&px) {
+        return;
+    }
+    let px = px as usize;
+    ICON_PX.with(|model| {
+        if model.row_data(px).is_some_and(|r| r.row_count() > 0) {
+            return;
+        }
+        let made: Vec<slint::Image> = ICON_SRC.with(|src| {
+            src.borrow()
+                .iter()
+                .map(|p| match p {
+                    Some(b) if (px as u32) < b.width().max(b.height()) => {
+                        let (tw, th, raw) = update::fit(b.as_bytes(), b.width(), b.height(), px as u32);
+                        slint::Image::from_rgba8_premultiplied(slint::SharedPixelBuffer::clone_from_slice(&raw, tw, th))
+                    }
+                    // drawn at its own size or larger: the emblem as it is
+                    Some(b) => slint::Image::from_rgba8(b.clone()),
+                    None => slint::Image::default(),
+                })
+                .collect()
+        });
+        if made.is_empty() {
+            return;
+        }
+        while model.row_count() <= px {
+            model.push(slint::ModelRc::default());
+        }
+        model.set_row_data(px, slint::ModelRc::new(slint::VecModel::from(made)));
+    });
+}
+
+/// The emblems (and whether they're loaded) from the main window, for another window.
+fn share_emblems(app: &AppWindow, icons: &RankIcons<'_>) {
+    let g = app.global::<RankIcons>();
+    icons.set_icons(g.get_icons());
+    icons.set_ready(g.get_ready());
+}
+
+/// Gives the main window's Sharp global the resampled avatar and banner and answers its requests.
+fn hook_sharp_pictures(app: &AppWindow) {
+    let g = app.global::<Sharp>();
+    g.set_pictures(PIC_OUT.with(|m| slint::ModelRc::from(m.clone())));
+    g.set_made(PIC_MADE.with(|m| slint::ModelRc::from(m.clone())));
+    let weak = app.as_weak();
+    g.on_want(move |use_, w, h| want_picture(&weak, use_, w, h));
+}
+
+/// The avatar (odd uses) or banner (even uses) resampled to `w` × `h` physical pixels and cropped
+/// like image-fit: cover, in the background.
+fn want_picture(app: &slint::Weak<AppWindow>, use_: i32, w: i32, h: i32) {
+    use slint::Model;
+    if !(0..4).contains(&use_) || !(1..=8192).contains(&w) || !(1..=8192).contains(&h) {
+        return;
+    }
+    let u = use_ as usize;
+    if PIC_BUSY.with(|b| b.get()[u]) {
+        return;
+    }
+    let Some(src) = PIC_SRC.with(|p| {
+        let p = p.borrow();
+        if u % 2 == 0 { p.1.clone() } else { p.0.clone() }
+    }) else {
+        return;
+    };
+    let gen = PIC_GEN.with(|g| g.get());
+    PIC_BUSY.with(|b| {
+        let mut a = b.get();
+        a[u] = true;
+        b.set(a);
+    });
+    let (sw, sh, raw) = (src.width(), src.height(), src.as_bytes().to_vec());
+    let finish = move |out: Vec<u8>| {
+        PIC_BUSY.with(|b| {
+            let mut a = b.get();
+            a[u] = false;
+            b.set(a);
+        });
+        // new pictures arrived meanwhile: this copy is of the old one
+        if PIC_GEN.with(|g| g.get()) != gen {
+            return;
+        }
+        PIC_OUT.with(|m| m.set_row_data(u, slint::Image::from_rgba8_premultiplied(slint::SharedPixelBuffer::clone_from_slice(&out, w as u32, h as u32))));
+        PIC_MADE.with(|m| {
+            if m.row_count() > u {
+                m.set_row_data(u, w * 65536 + h);
+            }
+        });
+    };
+    if MEDIA_SYNC.with(|s| s.get()) {
+        finish(update::cover(&raw, sw, sh, w as u32, h as u32));
+        return;
+    }
+    let weak = app.clone();
+    std::thread::spawn(move || {
+        let out = update::cover(&raw, sw, sh, w as u32, h as u32);
+        let _ = weak.upgrade_in_event_loop(move |_| finish(out));
+    });
 }
 
 enum MediaSlot {
@@ -250,7 +379,7 @@ fn show_rank_icons(app: &AppWindow, icons: Vec<Pixels>) {
     if icons.iter().all(Option::is_none) {
         return;
     }
-    let images: Vec<slint::Image> = icons.into_iter().map(|px| px.map(slint::Image::from_rgba8).unwrap_or_default()).collect();
+    let images = keep_icons(icons);
     let g = app.global::<RankIcons>();
     g.set_icons(slint::ModelRc::new(slint::VecModel::from(images)));
     g.set_ready(true);
@@ -268,6 +397,17 @@ fn load_rank_icons(app: &AppWindow, shared: &Shared) {
 
 fn show_pictures(app: &AppWindow, avatar: Pixels, banner: Pixels) {
     PICS.with(|p| *p.borrow_mut() = (avatar.is_some(), banner.is_some()));
+    PIC_SRC.with(|p| {
+        let mut p = p.borrow_mut();
+        if avatar.is_some() {
+            p.0 = avatar.clone();
+        }
+        if banner.is_some() {
+            p.1 = banner.clone();
+        }
+    });
+    PIC_GEN.with(|g| g.set(g.get() + 1));
+    PIC_MADE.with(|m| m.set_vec(vec![0; 4]));
     if let Some(a) = avatar {
         app.set_avatar(slint::Image::from_rgba8(a));
     }
@@ -453,7 +593,8 @@ fn show_next_toast(app: slint::Weak<AppWindow>) {
         return;
     };
     toast.global::<Theme>().set_dark(main.global::<Theme>().get_dark());
-    toast.global::<RankIcons>().set_icons(main.global::<RankIcons>().get_icons());
+    share_emblems(&main, &toast.global::<RankIcons>());
+    hook_sharp_icons(&toast.global::<Sharp>());
     toast.set_heading(note.title.into());
     toast.set_body(note.body.into());
     toast.set_tier_key(if note.tier.is_empty() { -1 } else { view::tier_key(&note.tier) });
@@ -522,7 +663,8 @@ fn set_mini(app: &AppWindow, shared: &Arc<Shared>, on: bool) {
     OVERLAY_NEXT.store(true, Ordering::SeqCst);
     let Ok(mini) = Mini::new() else { return };
     mini.global::<Theme>().set_dark(app.global::<Theme>().get_dark());
-    mini.global::<RankIcons>().set_icons(app.global::<RankIcons>().get_icons());
+    share_emblems(app, &mini.global::<RankIcons>());
+    hook_sharp_icons(&mini.global::<Sharp>());
     mini.on_drag({
         let w = mini.as_weak();
         move || {
@@ -587,7 +729,7 @@ fn update_mini(app: &AppWindow, shared: &Shared) {
         if let Some(mini) = m.borrow().as_ref() {
             save_mini_pos(mini, shared);
             // the emblems may have loaded after it opened, and the theme may have changed
-            mini.global::<RankIcons>().set_icons(app.global::<RankIcons>().get_icons());
+            share_emblems(app, &mini.global::<RankIcons>());
             mini.global::<Theme>().set_dark(app.global::<Theme>().get_dark());
             mini.set_rows(slint::ModelRc::new(slint::VecModel::from(view::mini_rows(&shared.lock()))));
         }
@@ -725,6 +867,8 @@ fn rerun_search(app: &AppWindow, shared: &Arc<Shared>, game: Game) {
 // ------------------------------------------------------------------ wiring
 fn wire(app: &AppWindow, shared: &Arc<Shared>) {
     app.global::<ChartMath>().on_step_path(|pts, w, h, area| view::step_path(&pts, w, h, area));
+    hook_sharp_icons(&app.global::<Sharp>());
+    hook_sharp_pictures(app);
     let actions = app.global::<Actions>();
 
     // Each handler gets its own handle to the window and the tracker.
@@ -1752,8 +1896,7 @@ mod screenshot {
     fn overlay_shot(window: &MinimalSoftwareWindow, shared: &Shared, kind: &str, o: &Options) -> Result<(), Box<dyn std::error::Error>> {
         let dark = o.theme.unwrap_or(true);
         let cache = shared.lock().data_file.with_file_name("ranks");
-        let icons: Vec<slint::Image> = ranks::load(&cache).into_iter().map(|px| px.map(slint::Image::from_rgba8).unwrap_or_default()).collect();
-        let icons = slint::ModelRc::new(slint::VecModel::from(icons));
+        let icons = slint::ModelRc::new(slint::VecModel::from(keep_icons(ranks::load(&cache))));
         let scale = o.scale.clamp(0.5, 4.0);
         let toast;
         let mut mini: Option<Mini> = None;
@@ -1763,6 +1906,7 @@ mod screenshot {
                 t.global::<Theme>().set_dark(dark);
                 t.global::<RankIcons>().set_icons(icons);
                 t.global::<RankIcons>().set_ready(true);
+                hook_sharp_icons(&t.global::<Sharp>());
                 let spec = o.note.clone().unwrap_or_else(|| "Notifications are on|This is how they look over a game.|Diamond III|1".into());
                 let mut f = spec.split('|');
                 t.set_heading(f.next().unwrap_or_default().into());
@@ -1778,6 +1922,7 @@ mod screenshot {
                 m.global::<Theme>().set_dark(dark);
                 m.global::<RankIcons>().set_icons(icons);
                 m.global::<RankIcons>().set_ready(true);
+                hook_sharp_icons(&m.global::<Sharp>());
                 m.set_rows(slint::ModelRc::new(slint::VecModel::from(view::mini_rows(&shared.lock()))));
                 mini = Some(m);
                 // its height is known once it has been laid out (rows and lines fill in when drawn)
@@ -1825,6 +1970,8 @@ mod screenshot {
         let repaint = if std::env::var_os("X76_PARTIAL").is_some() { RepaintBufferType::ReusedBuffer } else { RepaintBufferType::NewBuffer };
         let window = MinimalSoftwareWindow::new(repaint);
         slint::platform::set_platform(Box::new(Offscreen(window.clone()))).map_err(|e| format!("{e:?}"))?;
+        // no event loop to hand background results to: resample pictures right away
+        MEDIA_SYNC.with(|s| s.set(true));
         let shared = Shared::new(data_file);
         if !o.offline {
             shared.poll_once(&|_| {});
@@ -1918,7 +2065,6 @@ mod screenshot {
         show_rank_icons(&app, ranks::load(&cache));
         refresh(&app, &shared);
         if let Some(i) = o.whats_new {
-            MEDIA_SYNC.with(|s| s.set(true));
             load_changelog_media(&app, &shared, true);
             app.set_changelog_index(i);
             app.set_changelog_open(true);
@@ -2176,6 +2322,10 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     // docs builds: show one notification without the main window, then quit (to check it doesn't take focus)
     #[cfg(feature = "docs")]
     if args.iter().any(|a| a == "--notify-test") {
+        // like the app: its theme and the rank emblems
+        startup(&app, &shared);
+        let cache = shared.lock().data_file.with_file_name("ranks");
+        show_rank_icons(&app, ranks::load(&cache));
         shared.lock().notes.push(tracker::Note {
             title: "Notifications are on".into(),
             body: "This is how they look over a game.".into(),
@@ -2193,6 +2343,8 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "docs")]
     if args.iter().any(|a| a == "--mini-test") {
         startup(&app, &shared);
+        let cache = shared.lock().data_file.with_file_name("ranks");
+        show_rank_icons(&app, ranks::load(&cache));
         set_mini(&app, &shared, true);
         slint::Timer::single_shot(Duration::from_secs(8), || {
             let _ = slint::quit_event_loop();
