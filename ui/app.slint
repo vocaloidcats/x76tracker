@@ -27,6 +27,8 @@ export struct PlayerCard {
     elo: string, elo-delta: string, elo-dir: int, elo-field: string,
     wins: int, losses: int,
     show-elo: bool, show-all: bool, confirm-remove: bool, flash: int,
+    // Quake Live: Ranked / Casual / All tabs (mode 0 ranked, 1 casual, 2 all)
+    modes: bool, mode: int,
     has-chart: bool, chart: ChartData, tracking-since: string,
     events: [EventRow], total-events: int,
     kd: string, kd-ratio: string, acc: string, site24: string, site24-dir: int, site24-places: string, site24-places-dir: int,
@@ -119,6 +121,7 @@ export global Actions {
     callback remove(game: string, id: string);
     callback move(game: string, id: string, dir: int);
     callback metric(key: string, elo: bool);
+    callback ql-mode(key: string, mode: int);
     callback show-all(key: string);
     callback open-profile(id: string);
     callback dismiss-banner();
@@ -921,7 +924,14 @@ component PlayerCardView inherits Rectangle {
         HorizontalLayout {
             padding-top: 18px;
             padding-bottom: 8px;
-            Eyebrow { text: (root.p.show-elo ? "ELO · " : "POINTS · ") + root.period-upper; horizontal-stretch: 1; }
+            Eyebrow { text: (root.p.show-elo ? "ELO · " : "POINTS · ") + root.period-upper; horizontal-stretch: 1; overflow: elide; min-width: 0px; }
+            if root.p.modes: Pills {
+                options: ["Ranked", "Casual", "All"];
+                small: true;
+                selected: root.p.mode;
+                chosen(i) => { Actions.ql-mode(root.p.key, i); }
+            }
+            if root.p.modes: Rectangle { width: 8px; }
             Pills {
                 options: ["points", "elo"];
                 small: true;

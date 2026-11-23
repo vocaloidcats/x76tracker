@@ -985,6 +985,24 @@ fn wire(app: &AppWindow, shared: &Arc<Shared>) {
             }
         }
     });
+    actions.on_ql_mode({
+        let (w, s) = ctx!();
+        move |key, mode| {
+            {
+                let mut core = s.lock();
+                let mut m = core.state.settings.get("qlModes").and_then(Value::as_object).cloned().unwrap_or_default();
+                match mode {
+                    0 => m.insert(key.to_string(), "ranked".into()),
+                    1 => m.insert(key.to_string(), "casual".into()),
+                    _ => m.remove(key.as_str()),
+                };
+                core.set_setting("qlModes", Value::Object(m));
+            }
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
+            }
+        }
+    });
     actions.on_metric({
         let (w, s) = ctx!();
         move |key, elo| {

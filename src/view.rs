@@ -324,6 +324,80 @@ fn fights_for<'a>(core: &'a Core, game: Game, id: &str) -> Vec<&'a crate::r5log:
     }
 }
 
+// ------------------------------------------------------------------ Quake Live: ranked or casual
+/// Whether a Quake Live fight was ranked or casual. Only the ladder tells: ranked fights move
+/// your x76 kills and deaths (a few minutes later), casual ones don't. Accuracy lines say nothing
+/// (some x76 servers never print them), and fights x76 may still book are `Pending`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Ranked,
+    Casual,
+    Pending,
+}
+
+/// How long x76 may take to book a ranked fight on the ladder.
+const BOOK_LAG: f64 = 900.0;
+/// How long after a fight the ladder must have been read for "nothing booked" to mean casual
+/// (the booking lag plus a slow ladder check).
+const SETTLE: f64 = BOOK_LAG + 300.0;
+/// How long x76 usually takes to book a fight; a booking goes to the fight closest to this age.
+const TYPICAL_DELAY: f64 = 240.0;
+
+/// Labels each fight (`fights` sorted oldest first) from the ladder history `h` (a snapshot is
+/// saved whenever the ladder changes) and when this player's ladder was last read (`read`).
+///
+/// Every rise in ladder kills or deaths between two snapshots is that many ranked wins or
+/// losses booked. Each is matched to an unmatched fight of the same kind that x76 could have
+/// been booking then (played before the later snapshot, and no more than BOOK_LAG before the
+/// earlier one), preferring the one closest to TYPICAL_DELAY old, so a switch between ranked and
+/// casual can happen any number of times. Matched fights are ranked. An unmatched fight is
+/// casual once the ladder was read SETTLE after it, otherwise still pending; fights from before
+/// the first snapshot stay pending (whatever x76 booked for them is in that first reading).
+/// A drop in kills or deaths (a reset) books nothing.
+pub fn modes(h: &[Snap], fights: &[&crate::r5log::Fight], read: Option<f64>) -> Vec<Mode> {
+    let n = fights.len();
+    let times: Vec<f64> = fights.iter().map(|f| f.t).collect();
+    let mut ranked = vec![false; n];
+    for w in h.windows(2) {
+        let (p, s) = (&w[0], &w[1]);
+        let lo = times.partition_point(|t| *t < p.t - BOOK_LAG);
+        let hi = times.partition_point(|t| *t < s.t);
+        for (kill, count) in [(true, s.kills - p.kills), (false, s.deaths - p.deaths)] {
+            for _ in 0..count.max(0) {
+                let best = (lo..hi)
+                    .filter(|&k| !ranked[k] && (fights[k].kind == "kill") == kill)
+                    .min_by(|&x, &y| ((s.t - times[x]) - TYPICAL_DELAY).abs().total_cmp(&((s.t - times[y]) - TYPICAL_DELAY).abs()));
+                match best {
+                    Some(k) => ranked[k] = true,
+                    None => break,
+                }
+            }
+        }
+    }
+    let first = h.first().map(|s| s.t);
+    let last_read = read.into_iter().chain(h.last().map(|s| s.t)).fold(f64::MIN, f64::max);
+    (0..n)
+        .map(|k| {
+            if ranked[k] {
+                Mode::Ranked
+            } else if first.map_or(true, |f0| times[k] < f0) || last_read < times[k] + SETTLE {
+                Mode::Pending
+            } else {
+                Mode::Casual
+            }
+        })
+        .collect()
+}
+
+/// Which fights a Quake Live card shows: 0 ranked, 1 casual, 2 all (saved per card).
+fn ql_tab(core: &Core, key: &str) -> i32 {
+    match core.state.settings.get("qlModes").and_then(|m| m.get(key)).and_then(|v| v.as_str()) {
+        Some("ranked") => 0,
+        Some("casual") => 1,
+        _ => 2,
+    }
+}
+
 /// "47%" for an accuracy.
 fn pct(v: f64) -> String {
     format!("{v:.0}%")
@@ -394,7 +468,7 @@ fn predict_points(h: &[Snap]) -> Option<(f64, f64)> {
 /// happened). x76's later bookings: an Elo change booked right after a single fight is shown on
 /// that fight; otherwise Elo gets its own entry, and points always do. Elsewhere it's the
 /// ladder's own changes with W/L from its counts. Newest first, plus a predicted next booking.
-fn timeline(h: &[Snap], evs: &[Event], mine: &[&crate::r5log::Fight], start: f64, show_all: bool, interval: f64) -> (Vec<EventRow>, usize) {
+fn timeline(h: &[Snap], evs: &[Event], mine: &[&crate::r5log::Fight], casual: &[bool], ladder: bool, start: f64, show_all: bool, interval: f64) -> (Vec<EventRow>, usize) {
     // how soon after a fight an Elo booking still counts as that fight's
     let close = (2.0 * interval).max(120.0);
     let blank = |kind: i32, t: f64| EventRow {
@@ -410,7 +484,8 @@ fn timeline(h: &[Snap], evs: &[Event], mine: &[&crate::r5log::Fight], start: f64
     let mut on_fight: HashMap<usize, (String, i32)> = HashMap::new();
     let mut fight_note: HashMap<usize, String> = HashMap::new();
     for e in evs {
-        let in_window: Vec<usize> = (0..mine.len()).filter(|&i| mine[i].t > e.t_prev && mine[i].t <= e.t).collect();
+        // casual fights are never what x76 booked
+        let in_window: Vec<usize> = (0..mine.len()).filter(|&i| mine[i].t > e.t_prev && mine[i].t <= e.t && !casual.get(i).copied().unwrap_or(false)).collect();
         let (elo_t, elo_d) = delta_text(true, e.de, "", "–");
         let (pts_t, pts_d) = delta_text(false, e.dp, "P", "–");
         let tier_note = if e.tier_from != e.tier_to && !e.tier_to.is_empty() { format!("→ {}", e.tier_to.to_lowercase()) } else { String::new() };
@@ -468,8 +543,12 @@ fn timeline(h: &[Snap], evs: &[Event], mine: &[&crate::r5log::Fight], start: f64
     }
     for (i, f) in mine.iter().enumerate().filter(|(_, f)| f.t > start) {
         let mut row = blank(1, f.t);
-        // clicking a fight opens the ladder change it falls in
-        row.id = s(h.iter().find(|snap| snap.t >= f.t).map(|snap| row_id(snap.t)).unwrap_or_default());
+        // clicking a fight opens the ladder change it falls in (casual fights have none)
+        if ladder && !casual.get(i).copied().unwrap_or(false) {
+            row.id = s(h.iter().find(|snap| snap.t >= f.t).map(|snap| row_id(snap.t)).unwrap_or_default());
+        } else {
+            row.id = s("");
+        }
         if f.kind == "kill" {
             row.wins = 1;
         } else {
@@ -482,13 +561,15 @@ fn timeline(h: &[Snap], evs: &[Event], mine: &[&crate::r5log::Fight], start: f64
         }
         if let Some(n) = fight_note.get(&i) {
             row.note = s(n.as_str());
+        } else if ladder && casual.get(i).copied().unwrap_or(false) {
+            row.note = s("casual");
         }
         items.push((f.t, row));
     }
     items.sort_by(|a, b| b.0.total_cmp(&a.0));
     let total = items.len();
     let mut rows: Vec<EventRow> = items.into_iter().take(if show_all { 300 } else { 5 }).map(|(_, r)| r).collect();
-    if let Some((when, amount)) = predict_points(h) {
+    if let Some((when, amount)) = predict_points(h).filter(|_| ladder) {
         let mut row = blank(3, when);
         row.id = s("");
         row.when = s(format!("~{}", clock(when)));
@@ -536,7 +617,28 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
         _ => period.word().to_string(),
     };
 
-    let mine = fights_for(core, game, &fav.id);
+    let mut all_fights = fights_for(core, game, &fav.id);
+    all_fights.sort_by(|a, b| a.t.total_cmp(&b.t));
+    // Quake Live: Ranked / Casual / All. Ranked shows the ladder's own W/L and ranked fights;
+    // Casual only casual fights, counted from the game log (casual games don't touch the
+    // ladder); All everything, with casual wins and losses added to the ladder's.
+    let ql = game == Game::Ql && !all_fights.is_empty();
+    let tab = if ql { ql_tab(core, &key) } else { 2 };
+    let labels = if ql { modes(h, &all_fights, core.ladder_read.get(&key).copied()) } else { vec![Mode::Ranked; all_fights.len()] };
+    let keep = |m: Mode| match tab {
+        0 => m == Mode::Ranked,
+        1 => m == Mode::Casual,
+        _ => true,
+    };
+    let mine: Vec<&crate::r5log::Fight> = all_fights.iter().zip(&labels).filter(|(_, m)| keep(**m)).map(|(f, _)| *f).collect();
+    let casual_flags: Vec<bool> = all_fights.iter().zip(&labels).filter(|(_, m)| keep(**m)).map(|(_, m)| *m == Mode::Casual).collect();
+    let casual_in_period = |kind: &str| all_fights.iter().zip(&labels).filter(|(f, m)| **m == Mode::Casual && f.t >= start && f.kind == kind).count() as i64;
+    let (wins, losses) = match tab {
+        0 => (wins, losses),
+        1 => (casual_in_period("kill"), casual_in_period("death")),
+        _ => (wins + casual_in_period("kill"), losses + casual_in_period("death")),
+    };
+    let evs: Vec<Event> = if tab == 1 { Vec::new() } else { evs };
     // Quake Live: your accuracy over this period's fights (the ladder has none)
     let fight_acc: Vec<f64> = mine.iter().filter(|f| f.t >= start).filter_map(|f| f.my_acc).collect();
     let in_period: Vec<&crate::r5log::Fight> = mine.iter().copied().filter(|f| f.t >= start).collect();
@@ -549,7 +651,7 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
     let show_elo = metric_is_elo(core, &key);
     let show_all = ui.show_all.contains(&key);
     let chart_data = chart(h, start, show_elo);
-    let (mut rows, total_rows) = timeline(h, &evs, &mine, start, show_all, core.interval() as f64);
+    let (mut rows, total_rows) = timeline(h, &evs, &mine, &casual_flags, tab != 1, start, show_all, core.interval() as f64);
     // results that weren't on this board last time fade in (nothing does on the first draw)
     if let Some(seen) = ui.seen.get(&key) {
         for r in rows.iter_mut() {
@@ -599,6 +701,8 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
         losses: losses as i32,
         show_elo,
         show_all,
+        modes: ql,
+        mode: tab,
         confirm_remove: ui.confirm.as_deref() == Some(key.as_str()),
         flash: ui.flash.get(&key).copied().unwrap_or(0),
         has_chart: chart_data.is_some(),
@@ -1797,6 +1901,53 @@ mod tests {
 
     fn fight(t: f64, kind: &str, opp: &str, id: Option<&str>) -> Fight {
         Fight { t, kind: kind.into(), me: "me".into(), opponent: opp.into(), opp_id: id.map(String::from), ..Default::default() }
+    }
+
+    fn snap(t: f64, kills: i64, deaths: i64) -> Snap {
+        Snap { t, kills, deaths, ..Default::default() }
+    }
+
+    #[test]
+    fn ranked_or_casual_from_the_ladder() {
+        let f = |t: f64, kind: &str| fight(t, kind, "x", None);
+        let run = |fs: &[Fight], h: &[Snap], read: f64| {
+            let refs: Vec<&Fight> = fs.iter().collect();
+            modes(h, &refs, Some(read))
+        };
+        use Mode::*;
+        // a ranked win and loss (booked at 1400), then two casual wins (never booked)
+        let fs = [f(1000.0, "kill"), f(1100.0, "death"), f(5000.0, "kill"), f(5100.0, "kill")];
+        let h = [snap(900.0, 10, 10), snap(1400.0, 11, 11)];
+        assert_eq!(run(&fs, &h, 7000.0), vec![Ranked, Ranked, Casual, Casual]);
+        // the casual ones before the ladder was read long enough after them: pending
+        assert_eq!(&run(&fs, &h, 5200.0)[2..], &[Pending, Pending]);
+        // two ranked wins then casual within minutes: the booking goes to the right fights
+        let fs = [f(1000.0, "kill"), f(1050.0, "kill"), f(1100.0, "death"), f(1150.0, "kill")];
+        let h = [snap(900.0, 10, 10), snap(1300.0, 12, 10)];
+        assert_eq!(run(&fs, &h, 9000.0), vec![Ranked, Ranked, Casual, Casual]);
+        // casual first, then ranked: the late booking matches the ranked win, not the casual ones
+        let fs = [f(1000.0, "kill"), f(1060.0, "kill"), f(1500.0, "kill")];
+        let h = [snap(900.0, 10, 10), snap(1740.0, 11, 10)];
+        assert_eq!(run(&fs, &h, 9000.0), vec![Casual, Casual, Ranked]);
+        // ranked, casual, ranked again in one evening
+        let fs = [f(1000.0, "kill"), f(1300.0, "kill"), f(1600.0, "kill"), f(1900.0, "kill"), f(2200.0, "kill")];
+        let h = [snap(900.0, 0, 0), snap(1240.0, 1, 0), snap(1540.0, 2, 0), snap(2440.0, 3, 0)];
+        assert_eq!(run(&fs, &h, 9000.0), vec![Ranked, Ranked, Casual, Casual, Ranked]);
+        // a fight still waiting for its booking doesn't undo the ones already booked
+        let fs = [f(1000.0, "kill"), f(1300.0, "kill")];
+        let h = [snap(900.0, 0, 0), snap(1240.0, 1, 0)];
+        assert_eq!(run(&fs, &h, 1350.0), vec![Ranked, Pending]);
+        // the tracker was closed: everything shows up in one later reading
+        let fs = [f(1000.0, "kill"), f(1100.0, "death"), f(1200.0, "kill")];
+        let h = [snap(900.0, 0, 0), snap(50000.0, 1, 1)];
+        assert_eq!(run(&fs, &h, 50000.0).iter().filter(|m| **m == Ranked).count(), 2);
+        // a ladder reset books nothing and takes nothing back
+        let fs = [f(1000.0, "kill"), f(1100.0, "kill")];
+        let h = [snap(900.0, 100, 80), snap(1500.0, 102, 80), snap(50000.0, 0, 0)];
+        assert_eq!(run(&fs, &h, 60000.0), vec![Ranked, Ranked]);
+        // fights from before the first ladder reading: can't tell
+        let fs = [f(500.0, "kill")];
+        assert_eq!(run(&fs, &[snap(900.0, 1, 0)], 9000.0), vec![Pending]);
     }
 
     #[test]

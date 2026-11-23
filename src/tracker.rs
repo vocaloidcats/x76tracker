@@ -87,7 +87,7 @@ pub struct Player {
 }
 
 /// A saved point in a player's history. Written whenever points, Elo, K/D or tier change.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Snap {
     pub t: f64,
     #[serde(default)]
@@ -379,6 +379,8 @@ pub struct Core {
     pub next_poll: Option<f64>,
     /// Keys whose history grew in the last check, with the direction of the points change.
     pub fresh: HashMap<String, i32>,
+    /// When each tracked key's ladder entry was last read (a snapshot is only saved on change).
+    pub ladder_read: HashMap<String, f64>,
     pub load_warning: Option<String>,
     /// Your R5Reloaded fights from the game log (needs the optional game mod); kept in fights.json.
     pub fights: Vec<crate::r5log::Fight>,
@@ -449,6 +451,7 @@ impl Shared {
                 latest: HashMap::new(),
                 next_poll: None,
                 fresh: HashMap::new(),
+                ladder_read: HashMap::new(),
                 load_warning,
                 fights,
                 fights_file,
@@ -817,6 +820,7 @@ impl Core {
         let found = self.find(game, fav, board).cloned();
         self.latest.insert(key.clone(), found.clone());
         let Some(p) = found else { return false };
+        self.ladder_read.insert(key.clone(), t);
         if let Some(f) = self.state.favorites.iter_mut().find(|f| f.game == fav.game && f.id == fav.id) {
             if f.name != p.name {
                 f.name = p.name.clone();
