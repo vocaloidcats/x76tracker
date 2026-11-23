@@ -188,6 +188,11 @@ struct Event {
 fn events(h: &[Snap], start: f64) -> Vec<Event> {
     h.windows(2)
         .filter(|w| w[1].t > start)
+        // a reading where nothing changed isn't a result
+        .filter(|w| {
+            let (a, b) = (&w[0], &w[1]);
+            !(a.points == b.points && a.elo == b.elo && a.kills == b.kills && a.deaths == b.deaths && a.tier == b.tier)
+        })
         .map(|w| {
             let (a, b) = (&w[0], &w[1]);
             Event {
@@ -441,15 +446,6 @@ fn what_if(f: &crate::r5log::Fight, k: f64) -> Option<f64> {
     Some(k * (if f.kind == "kill" { 1.0 } else { 0.0 } - win_chance(me, opp)))
 }
 
-/// Which fights a Quake Live card shows: 0 ranked, 1 casual, 2 all (saved per card).
-fn ql_tab(core: &Core, key: &str) -> i32 {
-    match core.state.settings.get("qlModes").and_then(|m| m.get(key)).and_then(|v| v.as_str()) {
-        Some("ranked") => 0,
-        Some("casual") => 1,
-        _ => 2,
-    }
-}
-
 /// "47%" for an accuracy.
 fn pct(v: f64) -> String {
     format!("{v:.0}%")
@@ -617,9 +613,8 @@ fn timeline(h: &[Snap], evs: &[Event], mine: &[&crate::r5log::Fight], casual: &[
         }
         if let Some(n) = fight_note.get(&i) {
             row.note = s(n.as_str());
-        } else if ladder && casual.get(i).copied().unwrap_or(false) {
-            row.note = s("casual");
         }
+        row.casual = ladder && casual.get(i).copied().unwrap_or(false);
         items.push((f.t, row));
     }
     items.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -675,34 +670,21 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
 
     let mut all_fights = fights_for(core, game, &fav.id);
     all_fights.sort_by(|a, b| a.t.total_cmp(&b.t));
-    // Quake Live: Ranked / Casual / All. Ranked shows the ladder's own W/L and ranked fights;
-    // Casual only casual fights, counted from the game log (casual games don't touch the
-    // ladder); All everything, with casual wins and losses added to the ladder's.
+    // Quake Live: fights x76 never booked on the ladder were casual (you or the other player
+    // had casual on). They're listed with the rest, labelled (casual), each with what it would
+    // have been worth on ranked, and their wins and losses are added to the ladder's.
     let ql = game == Game::Ql && !all_fights.is_empty();
-    let tab = if ql { ql_tab(core, &key) } else { 2 };
     let labels = if ql { modes(h, &all_fights, core.ladder_read.get(&key).copied()) } else { vec![Mode::Ranked; all_fights.len()] };
-    let keep = |m: Mode| match tab {
-        0 => m == Mode::Ranked,
-        1 => m == Mode::Casual,
-        _ => true,
-    };
-    let mine: Vec<&crate::r5log::Fight> = all_fights.iter().zip(&labels).filter(|(_, m)| keep(**m)).map(|(f, _)| *f).collect();
-    let casual_flags: Vec<bool> = all_fights.iter().zip(&labels).filter(|(_, m)| keep(**m)).map(|(_, m)| *m == Mode::Casual).collect();
+    let mine: Vec<&crate::r5log::Fight> = all_fights.clone();
+    let casual_flags: Vec<bool> = labels.iter().map(|m| *m == Mode::Casual).collect();
     let step = if ql { elo_step(h, &all_fights, &labels) } else { None };
     let whatif: Vec<Option<f64>> = all_fights
         .iter()
         .zip(&labels)
-        .filter(|(_, m)| keep(**m))
         .map(|(f, m)| if *m == Mode::Casual { step.and_then(|k| what_if(f, k)) } else { None })
         .collect();
-    let casual_would: Option<f64> = step.map(|k| all_fights.iter().zip(&labels).filter(|(f, m)| **m == Mode::Casual && f.t >= start).filter_map(|(f, _)| what_if(f, k)).sum());
     let casual_in_period = |kind: &str| all_fights.iter().zip(&labels).filter(|(f, m)| **m == Mode::Casual && f.t >= start && f.kind == kind).count() as i64;
-    let (wins, losses) = match tab {
-        0 => (wins, losses),
-        1 => (casual_in_period("kill"), casual_in_period("death")),
-        _ => (wins + casual_in_period("kill"), losses + casual_in_period("death")),
-    };
-    let evs: Vec<Event> = if tab == 1 { Vec::new() } else { evs };
+    let (wins, losses) = (wins + casual_in_period("kill"), losses + casual_in_period("death"));
     // Quake Live: your accuracy over this period's fights (the ladder has none)
     let fight_acc: Vec<f64> = mine.iter().filter(|f| f.t >= start).filter_map(|f| f.my_acc).collect();
     let in_period: Vec<&crate::r5log::Fight> = mine.iter().copied().filter(|f| f.t >= start).collect();
@@ -715,7 +697,7 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
     let show_elo = metric_is_elo(core, &key);
     let show_all = ui.show_all.contains(&key);
     let chart_data = chart(h, start, show_elo);
-    let (mut rows, total_rows) = timeline(h, &evs, &mine, &casual_flags, &whatif, tab != 1, start, show_all, core.interval() as f64);
+    let (mut rows, total_rows) = timeline(h, &evs, &mine, &casual_flags, &whatif, true, start, show_all, core.interval() as f64);
     // results that weren't on this board last time fade in (nothing does on the first draw)
     if let Some(seen) = ui.seen.get(&key) {
         for r in rows.iter_mut() {
@@ -758,19 +740,13 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
         points_dir: pdir,
         since: s(since),
         elo: s(elo.map(one_decimal).unwrap_or_else(|| "–".into())),
-        // the Casual tab: what these games would have done on ranked
-        elo_delta: s(match (tab, casual_would) {
-            (1, Some(x)) => format!("≈{}{:.1} if ranked", if x >= 0.0 { "+" } else { "−" }, x.abs()),
-            _ => ed,
-        }),
-        elo_dir: if tab == 1 && casual_would.is_some() { 0 } else { edir },
+        elo_delta: s(ed),
+        elo_dir: edir,
         elo_field: s(game.elo_field()),
         wins: wins as i32,
         losses: losses as i32,
         show_elo,
         show_all,
-        modes: ql,
-        mode: tab,
         confirm_remove: ui.confirm.as_deref() == Some(key.as_str()),
         flash: ui.flash.get(&key).copied().unwrap_or(0),
         has_chart: chart_data.is_some(),
