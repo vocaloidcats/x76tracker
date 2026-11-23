@@ -389,6 +389,58 @@ pub fn modes(h: &[Snap], fights: &[&crate::r5log::Fight], read: Option<f64>) -> 
         .collect()
 }
 
+/// How far x76 moves your Elo per fight (the K in Elo = K × (result − chance)), worked out from
+/// your own ranked history: for each ladder change that booked ranked fights we know (with
+/// both players' Elo from the check before), K = Elo change ÷ Σ(result − chance); the median of
+/// those. None until there's one.
+pub fn elo_step(h: &[Snap], fights: &[&crate::r5log::Fight], labels: &[Mode]) -> Option<f64> {
+    let mut ks: Vec<f64> = Vec::new();
+    let mut claimed = vec![false; fights.len()];
+    for w in h.windows(2) {
+        let (p, s) = (&w[0], &w[1]);
+        let Some(de) = s.elo.zip(p.elo).map(|(a, b)| a - b) else { continue };
+        let booked = (s.kills - p.kills).max(0) + (s.deaths - p.deaths).max(0);
+        if booked == 0 || de.abs() < 0.005 {
+            continue;
+        }
+        // the ranked fights this change booked, matched the same way as in `modes`
+        let mut mine: Vec<&crate::r5log::Fight> = Vec::new();
+        for (kill, count) in [(true, s.kills - p.kills), (false, s.deaths - p.deaths)] {
+            for _ in 0..count.max(0) {
+                let best = (0..fights.len())
+                    .filter(|&k| !claimed[k] && labels[k] == Mode::Ranked && fights[k].t < s.t && fights[k].t >= p.t - BOOK_LAG && (fights[k].kind == "kill") == kill)
+                    .min_by(|&x, &y| ((s.t - fights[x].t) - TYPICAL_DELAY).abs().total_cmp(&((s.t - fights[y].t) - TYPICAL_DELAY).abs()));
+                if let Some(k) = best {
+                    claimed[k] = true;
+                    mine.push(fights[k]);
+                }
+            }
+        }
+        if mine.len() as i64 != booked {
+            continue; // can't tell which fights it was
+        }
+        let mut sum = 0.0;
+        for f in &mine {
+            let (Some(me), Some(opp)) = (f.my_elo, f.opp_elo) else { sum = f64::NAN; break };
+            sum += if f.kind == "kill" { 1.0 } else { 0.0 } - win_chance(me, opp);
+        }
+        if sum.is_finite() && sum.abs() >= 0.15 && (de > 0.0) == (sum > 0.0) {
+            ks.push(de / sum);
+        }
+    }
+    if ks.is_empty() {
+        return None;
+    }
+    ks.sort_by(f64::total_cmp);
+    Some(ks[ks.len() / 2].clamp(1.0, 64.0))
+}
+
+/// What a casual fight would have done to your Elo on ranked (needs both players' Elo).
+fn what_if(f: &crate::r5log::Fight, k: f64) -> Option<f64> {
+    let (me, opp) = (f.my_elo?, f.opp_elo?);
+    Some(k * (if f.kind == "kill" { 1.0 } else { 0.0 } - win_chance(me, opp)))
+}
+
 /// Which fights a Quake Live card shows: 0 ranked, 1 casual, 2 all (saved per card).
 fn ql_tab(core: &Core, key: &str) -> i32 {
     match core.state.settings.get("qlModes").and_then(|m| m.get(key)).and_then(|v| v.as_str()) {
@@ -468,7 +520,7 @@ fn predict_points(h: &[Snap]) -> Option<(f64, f64)> {
 /// happened). x76's later bookings: an Elo change booked right after a single fight is shown on
 /// that fight; otherwise Elo gets its own entry, and points always do. Elsewhere it's the
 /// ladder's own changes with W/L from its counts. Newest first, plus a predicted next booking.
-fn timeline(h: &[Snap], evs: &[Event], mine: &[&crate::r5log::Fight], casual: &[bool], ladder: bool, start: f64, show_all: bool, interval: f64) -> (Vec<EventRow>, usize) {
+fn timeline(h: &[Snap], evs: &[Event], mine: &[&crate::r5log::Fight], casual: &[bool], whatif: &[Option<f64>], ladder: bool, start: f64, show_all: bool, interval: f64) -> (Vec<EventRow>, usize) {
     // how soon after a fight an Elo booking still counts as that fight's
     let close = (2.0 * interval).max(120.0);
     let blank = |kind: i32, t: f64| EventRow {
@@ -558,6 +610,10 @@ fn timeline(h: &[Snap], evs: &[Event], mine: &[&crate::r5log::Fight], casual: &[
         if let Some((t, d)) = on_fight.get(&i) {
             row.elo = s(t.as_str());
             row.elo_dir = *d;
+        } else if let Some(x) = whatif.get(i).copied().flatten() {
+            // a casual fight: what it would have been worth on ranked
+            row.elo = s(format!("≈{}{:.1}", if x >= 0.0 { "+" } else { "−" }, x.abs()));
+            row.elo_dir = 0;
         }
         if let Some(n) = fight_note.get(&i) {
             row.note = s(n.as_str());
@@ -632,6 +688,14 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
     };
     let mine: Vec<&crate::r5log::Fight> = all_fights.iter().zip(&labels).filter(|(_, m)| keep(**m)).map(|(f, _)| *f).collect();
     let casual_flags: Vec<bool> = all_fights.iter().zip(&labels).filter(|(_, m)| keep(**m)).map(|(_, m)| *m == Mode::Casual).collect();
+    let step = if ql { elo_step(h, &all_fights, &labels) } else { None };
+    let whatif: Vec<Option<f64>> = all_fights
+        .iter()
+        .zip(&labels)
+        .filter(|(_, m)| keep(**m))
+        .map(|(f, m)| if *m == Mode::Casual { step.and_then(|k| what_if(f, k)) } else { None })
+        .collect();
+    let casual_would: Option<f64> = step.map(|k| all_fights.iter().zip(&labels).filter(|(f, m)| **m == Mode::Casual && f.t >= start).filter_map(|(f, _)| what_if(f, k)).sum());
     let casual_in_period = |kind: &str| all_fights.iter().zip(&labels).filter(|(f, m)| **m == Mode::Casual && f.t >= start && f.kind == kind).count() as i64;
     let (wins, losses) = match tab {
         0 => (wins, losses),
@@ -651,7 +715,7 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
     let show_elo = metric_is_elo(core, &key);
     let show_all = ui.show_all.contains(&key);
     let chart_data = chart(h, start, show_elo);
-    let (mut rows, total_rows) = timeline(h, &evs, &mine, &casual_flags, tab != 1, start, show_all, core.interval() as f64);
+    let (mut rows, total_rows) = timeline(h, &evs, &mine, &casual_flags, &whatif, tab != 1, start, show_all, core.interval() as f64);
     // results that weren't on this board last time fade in (nothing does on the first draw)
     if let Some(seen) = ui.seen.get(&key) {
         for r in rows.iter_mut() {
@@ -694,8 +758,12 @@ fn card(core: &Core, game: Game, fav: &Favorite, idx: usize, count: usize, perio
         points_dir: pdir,
         since: s(since),
         elo: s(elo.map(one_decimal).unwrap_or_else(|| "–".into())),
-        elo_delta: s(ed),
-        elo_dir: edir,
+        // the Casual tab: what these games would have done on ranked
+        elo_delta: s(match (tab, casual_would) {
+            (1, Some(x)) => format!("≈{}{:.1} if ranked", if x >= 0.0 { "+" } else { "−" }, x.abs()),
+            _ => ed,
+        }),
+        elo_dir: if tab == 1 && casual_would.is_some() { 0 } else { edir },
         elo_field: s(game.elo_field()),
         wins: wins as i32,
         losses: losses as i32,
@@ -1948,6 +2016,28 @@ mod tests {
         // fights from before the first ladder reading: can't tell
         let fs = [f(500.0, "kill")];
         assert_eq!(run(&fs, &[snap(900.0, 1, 0)], 9000.0), vec![Pending]);
+    }
+
+    #[test]
+    fn elo_step_from_bookings() {
+        let f = |t: f64, kind: &str| {
+            let mut x = fight(t, kind, "x", None);
+            x.my_elo = Some(1200.0);
+            x.opp_elo = Some(1200.0);
+            x
+        };
+        // even matches: a win is +0.5 × K. Three single-fight bookings of +3 each: K = 6
+        let fs = [f(1000.0, "kill"), f(2000.0, "kill"), f(3000.0, "kill")];
+        let refs: Vec<&Fight> = fs.iter().collect();
+        let mut h = vec![Snap { t: 900.0, elo: Some(1200.0), ..Default::default() }];
+        for (i, t) in [1200.0, 2200.0, 3200.0].iter().enumerate() {
+            h.push(Snap { t: *t, elo: Some(1200.0 + 3.0 * (i + 1) as f64), kills: i as i64 + 1, ..Default::default() });
+        }
+        let labels = vec![Mode::Ranked; 3];
+        let k = elo_step(&h, &refs, &labels).unwrap();
+        assert!((k - 6.0).abs() < 1e-9, "{k}");
+        // a casual even-match loss would have been −3
+        assert!((what_if(&f(4000.0, "death"), k).unwrap() + 3.0).abs() < 1e-9);
     }
 
     #[test]
