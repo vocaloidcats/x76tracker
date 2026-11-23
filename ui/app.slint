@@ -3185,6 +3185,8 @@ component MiniRowView inherits VerticalLayout {
 // Like notifications it never takes focus, so clicking it over a game leaves the game in front.
 export component Mini inherits Window {
     title: "x76tracker mini";
+    // every window names its font: without this, plain text falls back to the system font
+    default-font-family: "Archivo";
     no-frame: true;
     always-on-top: true;
     width: 330px;
@@ -3229,6 +3231,8 @@ export component Mini inherits Window {
 // the window) and slides in and out by moving the window itself.
 export component Toast inherits Window {
     title: "x76tracker notification";
+    // every window names its font: without this, plain text falls back to the system font
+    default-font-family: "Archivo";
     no-frame: true;
     always-on-top: true;
     width: 360px;
