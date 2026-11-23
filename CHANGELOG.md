@@ -9,7 +9,7 @@ Each version's section is shown in the app (What's new) and used as its GitHub r
 ### New
 
 - **Quake Live opponents:** your fights in x76's LG arena now show up like R5Reloaded's: who you fought, their tier, rank and Elo, how far above or below you they were, your chance on paper, and upsets. Each fight also shows both players' accuracy, as the x76 server prints it after the fight. Click a result to see its fights, and track an opponent with one click.
-  ![Quake Live fights on the board, with your accuracy over the last 24 hours](docs/changelog/2.3.0-ql-board@2x.png)
+  ![Quake Live fights on the board: W, W, L against am9u](docs/changelog/2.3.0-ql-board@2x.png)
 - **Console log switch:** Settings → General → Log who I fight in Quake Live adds set logfile 2 to Quake Live's autoexec.cfg, so the game saves its console to qconsole.log for x76tracker to read. Switching it off takes the line out again. To start without restarting the game, type \set logfile 2 in its console.
   ![The Quake Live opponents switch in Settings](docs/changelog/2.3.0-ql-settings@2x.png)
 - **Rivals:** click an opponent's name in a result's fights, or in your card's footer, to see your head-to-head with them. It shows your all-time record and their Elo now. You also get both players' accuracy in Quake Live or the upsets in R5Reloaded, when you first met, and every fight between you.
@@ -25,13 +25,13 @@ Each version's section is shown in the app (What's new) and used as its GitHub r
 
 ### Improved
 
-- **Quake Live stats:** your Quake Live card shows your average accuracy over the period's fights.
 - **Discord is experimental:** Rich Presence and the profile widget moved to their own tab, Settings → Experimental. Both are off until you turn them on, and nothing changes if you already use them.
   ![Settings → Experimental: Rich Presence and the Discord profile widget](docs/changelog/2.3.0-experimental@2x.png)
-- **Looks more like x76.gg:** switches are x76 blue, smaller, and their knob springs across. Avatars are rounded squares. The Today / Last 24h / All tracked and points / elo switches are x76's mono filter pills, and the chosen option slides over. Settings headings are in sentence case. Servers show online or offline as a word, with one blue segment per player slot. Pop-ups dim the window in its own warm colour instead of black, and loading messages lose their "…".
+- **Looks more like x76.gg:** switches are x76 blue, smaller, and their knob springs across. Avatars are rounded squares. The Today / Last 24h / All tracked and points / elo switches are smaller x76-style pills, and the chosen option slides over. Settings headings are in sentence case. Servers show online or offline as a word, with one blue segment per player slot. Pop-ups dim the window in its own warm colour instead of black, loading messages lose their "…", and the k/d and 24h stats line under each card is gone.
 
 ### Fixed
 
+- **Settings switches:** the game-log, recap and notification switches now flip as soon as you change them. Before, the status under them changed but the switch could stay where it was.
 - **Sharper pictures:** rank emblems, your avatar and banner, and the pictures in What's new are resized smoothly to the exact size they're shown at, in the app and in saved share cards. Before, shrinking them dropped pixels, so emblems looked grainy and text in pictures looked thin and jagged. In the picture, the top half is before the fix and the bottom half is now.
   ![The same part of a picture twice: on top, thin broken letters and a jagged emblem; below, smooth and even](docs/changelog/2.3.0-sharp-pictures.png)
 

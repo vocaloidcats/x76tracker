@@ -1063,28 +1063,6 @@ component PlayerCardView inherits Rectangle {
             padding-top: 12px;
             spacing: 10px;
             Rectangle { height: 1px; background: Theme.line-1; }
-            HorizontalLayout {
-                alignment: start;
-                spacing: 16px;
-                HorizontalLayout {
-                    spacing: 5px;
-                    Mono { text: "k/d"; }
-                    Mono { text: root.p.kd; color: Theme.fg; font-weight: 500; }
-                    Mono { text: "·"; }
-                    Mono { text: root.p.kd-ratio; color: Theme.fg; font-weight: 500; }
-                }
-                if root.p.acc != "": HorizontalLayout {
-                    spacing: 5px;
-                    Mono { text: "acc"; }
-                    Mono { text: root.p.acc; color: Theme.fg; font-weight: 500; }
-                }
-                if root.p.site24 != "": HorizontalLayout {
-                    spacing: 6px;
-                    Mono { text: "x76 24h"; }
-                    Delta { text: root.p.site24; dir: root.p.site24-dir; size: 11px; mono: true; }
-                    if root.p.site24-places-dir != 0: Delta { text: root.p.site24-places; dir: root.p.site24-places-dir; size: 11px; mono: true; }
-                }
-            }
             if root.p.nemesis != "" || root.p.victim != "" || root.p.recap >= 0: HorizontalLayout {
                 alignment: start;
                 spacing: 16px;

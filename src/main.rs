@@ -512,7 +512,16 @@ fn set_discord_page(app: &AppWindow, core: &tracker::Core, force: bool) {
     let mut cfg = discord::Config::load(core);
     cfg.custom.clear();
     let favs: Vec<(&str, &str, &str)> = core.state.favorites.iter().map(|f| (f.game.as_str(), f.id.as_str(), f.name.as_str())).collect();
-    let sig = format!("{}|{}|{favs:?}", serde_json::to_string(&cfg).unwrap_or_default(), core.discord.token.is_some());
+    // everything the page shows from elsewhere too: the game-log switches, recap and notifications
+    let sig = format!(
+        "{}|{}|{favs:?}|{:?}|{:?}|{:?}|{}",
+        serde_json::to_string(&cfg).unwrap_or_default(),
+        core.discord.token.is_some(),
+        core.r5patch,
+        core.qllog,
+        core.state.settings.get("recapAuto"),
+        core.notify_on()
+    );
     let changed = DISCORD_SIG.with(|s| {
         let mut s = s.borrow_mut();
         let changed = force || *s != sig;
