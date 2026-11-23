@@ -1244,30 +1244,19 @@ component Pill inherits Rectangle {
     in property <bool> on-image;
     in property <bool> shiny;
     border-radius: self.height / 2;
-    background: root.on-image ? #ffffff2e : Theme.surface;
+    background: root.shiny ? transparent : root.on-image ? #ffffff2e : Theme.surface;
+    if root.shiny: RainbowFill { width: parent.width; height: parent.height; border-radius: parent.height / 2; play: pill-ta.has-hover; }
+    pill-ta := TouchArea { }
     HorizontalLayout {
-        padding-left: root.shiny ? 7px : 9px;
+        padding-left: 9px;
         padding-right: 9px;
         padding-top: 2px;
         padding-bottom: 2px;
-        spacing: 5px;
-        // x76 marks supporters with a heart in its danger red
-        if root.shiny: VerticalLayout {
-            alignment: center;
-            Path {
-                width: 10px;
-                height: 9px;
-                viewbox-width: 12;
-                viewbox-height: 11;
-                commands: "M 6 10.5 L 1.5 6 C 0.3 4.8 0.3 2.8 1.5 1.6 C 2.7 0.4 4.6 0.5 6 2 C 7.4 0.5 9.3 0.4 10.5 1.6 C 11.7 2.8 11.7 4.8 10.5 6 Z";
-                fill: Theme.danger;
-            }
-        }
         Mono {
             text: root.text;
             font-size: 10.5px;
-            font-weight: 500;
-            color: root.on-image ? #ffffff : Theme.fg-muted;
+            font-weight: root.shiny ? 600 : 500;
+            color: root.shiny ? #17161a : root.on-image ? #ffffff : Theme.fg-muted;
         }
     }
 }
