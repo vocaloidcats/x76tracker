@@ -82,10 +82,14 @@ pub fn picture(url: &str, max_side: u32, circle: bool) -> Option<SharedPixelBuff
     let mut rgba = img.to_rgba8();
     if circle {
         let (w, h) = rgba.dimensions();
-        let (cx, cy, r) = (w as f32 / 2.0, h as f32 / 2.0, w.min(h) as f32 / 2.0);
+        // a rounded square, like x76's avatars (corner radius 15% of the side), with a 1px soft edge
+        let (cx, cy, half) = (w as f32 / 2.0, h as f32 / 2.0, w.min(h) as f32 / 2.0);
+        let r = w.min(h) as f32 * 0.15;
         for (x, y, px) in rgba.enumerate_pixels_mut() {
-            let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
-            let cover = (r - d + 0.5).clamp(0.0, 1.0); // 1px soft edge
+            let dx = ((x as f32 + 0.5 - cx).abs() - (half - r)).max(0.0);
+            let dy = ((y as f32 + 0.5 - cy).abs() - (half - r)).max(0.0);
+            let d = (dx * dx + dy * dy).sqrt() - r;
+            let cover = (0.5 - d).clamp(0.0, 1.0);
             px[3] = (px[3] as f32 * cover) as u8;
         }
     }

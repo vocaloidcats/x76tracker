@@ -1459,7 +1459,7 @@ pub fn servers_status(core: &Core) -> String {
     match (&core.servers_error, core.servers_at) {
         (Some(e), _) => format!("last check failed: {e}"),
         (None, Some(t)) => format!("checked {} · every minute", ago(Some(t))),
-        (None, None) => "checking x76's servers…".into(),
+        (None, None) => "checking x76's servers".into(),
     }
 }
 
@@ -1473,7 +1473,7 @@ pub fn live_status(core: &Core) -> (String, i32) {
         return ("idle · track a player to start".into(), 0);
     }
     if tracked.iter().any(|g| core.status[g].busy) {
-        return ("checking the ladder…".into(), 2);
+        return ("checking the ladder".into(), 2);
     }
     if tracked.iter().any(|g| core.status[g].failing()) {
         return (format!("can't reach x76{}", next.map(|n| format!(" · retry in {n}s")).unwrap_or_default()), 3);
@@ -1493,7 +1493,7 @@ pub fn game_status(core: &Core, game: Game) -> (String, bool) {
         return (format!("{} ranked players · checked {}", thousands(st.count as i64), ago(st.fetched)), false);
     }
     if st.busy || tracked {
-        return ("loading ladder…".into(), false);
+        return ("loading the ladder".into(), false);
     }
     ("not checked until you track someone".into(), false)
 }
@@ -1665,7 +1665,7 @@ pub fn update_status(core: &Core) -> (String, i32) {
         return (format!("Downloading {v}… {}%", (p * 100.0).round()), 1);
     }
     if u.checking {
-        return ("Checking GitHub for a new version…".into(), 1);
+        return ("Checking GitHub for a new version.".into(), 1);
     }
     if let Some(e) = &u.error {
         return (e.clone(), 3);
@@ -1704,7 +1704,7 @@ pub fn patch_status(core: &Core) -> (String, i32) {
         }
         (Some(State::Off), _) => ("Off. The game's script is untouched.".into(), 0),
         (Some(State::NoScript), _) => ("This R5Reloaded folder has no cl_obituary.gnut, so there's nothing to patch.".into(), 3),
-        (None, _) => ("Checking the game folder…".into(), 1),
+        (None, _) => ("Checking the game folder.".into(), 1),
     }
 }
 
@@ -1732,7 +1732,7 @@ pub fn ql_log_status(core: &Core) -> (String, i32) {
             Some(age) if age < 600.0 => (format!("Off in autoexec.cfg, but logfile is on in the game right now, so the console log{whose} is read anyway."), 2),
             _ => ("Off. autoexec.cfg is untouched.".into(), 0),
         },
-        None => ("Checking the game folder…".into(), 1),
+        None => ("Checking the game folder.".into(), 1),
     }
 }
 
@@ -1757,7 +1757,7 @@ pub fn discord_status(core: &Core) -> DiscordStatus {
         let who = d.rpc_user.as_ref().map(|u| format!(" for {u}")).unwrap_or_default();
         (format!("Showing {game} on Discord{who}."), 2)
     } else if let Some(g) = d.playing {
-        (format!("{} is running; connecting to Discord…", g.label()), 1)
+        (format!("{} is running; connecting to Discord.", g.label()), 1)
     } else {
         ("On. It appears once R5Reloaded or Quake Live is running.".to_string(), 1)
     };
@@ -1776,10 +1776,10 @@ pub fn discord_status(core: &Core) -> DiscordStatus {
     } else if let Some(t) = d.ok_at {
         (format!("Widget updated {}. The next update goes out when your numbers change.", ago(Some(t))), 2)
     } else {
-        ("Sending the first update…".to_string(), 1)
+        ("Sending the first update.".to_string(), 1)
     };
     let layout = match &d.layout_note {
-        _ if d.layout_busy => ("Reading the widget layout from Discord…".to_string(), false, true),
+        _ if d.layout_busy => ("Reading the widget layout from Discord.".to_string(), false, true),
         Some((err, text)) => (text.clone(), *err, false),
         None if !cfg.layout.is_empty() => {
             let name = if cfg.widget_name.is_empty() { "The widget".to_string() } else { format!("“{}”", cfg.widget_name) };

@@ -839,7 +839,7 @@ fn on_search(app: &AppWindow, shared: &Arc<Shared>, game: Game, query: String) {
         set_results(app, game, &hits, &search_message(game, &query, hits.len(), total));
         return;
     }
-    set_results(app, game, &[], &format!("Loading the {} ladder…", game.label()));
+    set_results(app, game, &[], &format!("Loading the {} ladder.", game.label()));
     let (weak, shared) = (app.as_weak(), shared.clone());
     std::thread::spawn(move || {
         let outcome = shared.search_board(game).map(|b| tracker::search(&b, game, &query, &tracked, SEARCH_SHOWN));

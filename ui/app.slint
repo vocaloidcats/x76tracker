@@ -180,6 +180,10 @@ export global Theme {
     out property <color> line-1: dark ? #f5f3ee29 : #17161a21;
     out property <color> line-2: dark ? #f5f3ee4d : #17161a3d;
     out property <color> accent-fg: dark ? #8fb4ff : #2b4bf2;
+    // x76's blue for FILLS (toggle on, player slots, highlight badges, the update button): the same
+    // in both themes; accent-fg (the light glow in dark) is only for text, rings and icons
+    out property <color> accent: #2b4bf2;
+    out property <color> accent-pressed: #1b2fb0;
     out property <color> action-bg: dark ? #f5f3ee : #141313;
     out property <color> action-fg: dark ? #17161a : #f5f3ee;
     out property <color> positive: dark ? #57c87f : #2e7d4f;
@@ -201,6 +205,11 @@ export global Theme {
             : k == 7 ? (dark ? #ffd977 : #c07d00)
             : fg-faint;
     }
+    // x76's spring for things that slide (selected pill, switch knob): one step of a damped
+    // spring per 16 ms frame; returns the new speed
+    public pure function spring-step(pos: float, target: float, speed: float) -> float {
+        return (speed + (target - pos) * 0.25) * 0.55;
+    }
     public pure function dir-color(d: int) -> color {
         return d > 0 ? positive : d < 0 ? danger : fg-faint;
     }
@@ -217,6 +226,16 @@ component Mono inherits Text {
 component Eyebrow inherits Mono {
     letter-spacing: 0.22px;
 }
+
+// A section heading inside a panel: Archivo semibold, sentence case (x76 keeps capitals for the
+// small label over a big number)
+component SectionTitle inherits Text {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.15px;
+    color: Theme.fg;
+}
+
 
 // x76-style change marker: small ▲/▼ triangle + magnitude, coloured by direction
 component Delta inherits HorizontalLayout {
@@ -247,6 +266,9 @@ component Delta inherits HorizontalLayout {
     }
 }
 
+// x76's segmented control: a surface-2 track with a surface "blob" behind the chosen option that
+// springs over when the choice changes. small = a filter (IBM Plex Mono 11.5px), otherwise
+// navigation (Archivo 13.5px semibold).
 component Pills inherits Rectangle {
     in property <[string]> options;
     in property <int> selected;
@@ -254,27 +276,71 @@ component Pills inherits Rectangle {
     callback chosen(index: int);
     background: Theme.surface-2;
     border-radius: self.height / 2;
+    // where the chosen option is (its own Timer reports it) and where the blob is now
+    property <length> tx;
+    property <length> tw;
+    property <float> bx;
+    property <float> bw;
+    property <float> vx;
+    property <float> vw;
+    property <bool> settled: abs(root.bx - root.tx / 1px) < 0.25 && abs(root.bw - root.tw / 1px) < 0.25 && abs(root.vx) < 0.25 && abs(root.vw) < 0.25;
+    Timer {
+        interval: 16ms;
+        running: root.tw > 0 && !root.settled;
+        triggered => {
+            if (root.bw <= 0) {
+                root.bx = root.tx / 1px;
+                root.bw = root.tw / 1px;
+            } else {
+                root.vx = Theme.spring-step(root.bx, root.tx / 1px, root.vx);
+                root.vw = Theme.spring-step(root.bw, root.tw / 1px, root.vw);
+                root.bx += root.vx;
+                root.bw += root.vw;
+                if (abs(root.bx - root.tx / 1px) < 0.25 && abs(root.vx) < 0.25 && abs(root.bw - root.tw / 1px) < 0.25 && abs(root.vw) < 0.25) {
+                    root.bx = root.tx / 1px;
+                    root.bw = root.tw / 1px;
+                    root.vx = 0;
+                    root.vw = 0;
+                }
+            }
+        }
+    }
+    if root.bw > 0: Rectangle {
+        x: root.bx * 1px;
+        y: 4px;
+        width: root.bw * 1px;
+        height: root.height - 8px;
+        border-radius: self.height / 2;
+        background: Theme.surface;
+    }
     HorizontalLayout {
-        padding: root.small ? 3px : 4px;
-        spacing: root.small ? 2px : 4px;
-        for opt[i] in root.options: Rectangle {
-            border-radius: self.height / 2;
-            background: i == root.selected ? Theme.surface : transparent;
-            animate background { duration: 150ms; }
+        padding: 4px;
+        spacing: 4px;
+        for opt[i] in root.options: o := Rectangle {
+            Timer {
+                interval: 16ms;
+                running: i == root.selected && o.width > 0 && (root.tx != o.x || root.tw != o.width);
+                triggered => {
+                    root.tx = o.x;
+                    root.tw = o.width;
+                }
+            }
             HorizontalLayout {
-                padding-left: root.small ? 11px : 18px;
+                padding-left: root.small ? 12px : 18px;
                 padding-right: self.padding-left;
-                padding-top: root.small ? 4px : 9px;
+                padding-top: root.small ? 8px : 9px;
                 padding-bottom: self.padding-top;
                 Text {
                     text: opt;
-                    font-size: root.small ? 12px : 13.5px;
-                    font-weight: 600;
-                    color: i == root.selected || pill-ta.has-hover ? Theme.fg : Theme.fg-muted;
+                    font-family: root.small ? Theme.mono : "Archivo";
+                    font-size: root.small ? 11.5px : 13.5px;
+                    font-weight: root.small ? 400 : 600;
+                    letter-spacing: root.small ? 0.23px : 0px;
+                    color: i == root.selected ? Theme.fg : Theme.fg-muted;
                     horizontal-alignment: center;
                 }
             }
-            pill-ta := TouchArea {
+            TouchArea {
                 mouse-cursor: pointer;
                 clicked => { if (i != root.selected) { root.chosen(i); } }
             }
@@ -288,12 +354,12 @@ component Button inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked;
     border-radius: self.height / 2;
-    background: root.kind == 1 ? (btn-ta.has-hover && root.enabled ? Theme.surface-2 : Theme.surface)
-        : root.kind == 2 ? (btn-ta.has-hover ? Theme.danger.darker(0.15) : Theme.danger)
+    // x76 has no red button: "danger" is a secondary button with red text
+    background: root.kind >= 1 ? (btn-ta.has-hover && root.enabled ? Theme.surface-2 : Theme.surface)
         : (btn-ta.has-hover && root.enabled ? (Theme.dark ? #ffffff : #3a3735) : Theme.action-bg);
     border-width: 1px;
-    border-color: root.kind == 1 ? Theme.line-2 : self.background;
-    opacity: root.enabled ? (btn-ta.pressed ? 0.72 : 1) : 0.55;
+    border-color: root.kind >= 1 ? Theme.line-2 : self.background;
+    opacity: root.enabled ? 1 : 0.45;
     HorizontalLayout {
         padding-left: 14px;
         padding-right: 14px;
@@ -303,7 +369,7 @@ component Button inherits Rectangle {
             text: root.text;
             font-size: 14px;
             font-weight: 500;
-            color: root.kind == 1 ? Theme.fg : root.kind == 2 ? #ffffff : Theme.action-fg;
+            color: root.kind == 1 ? Theme.fg : root.kind == 2 ? Theme.danger : Theme.action-fg;
             horizontal-alignment: center;
             vertical-alignment: center;
         }
@@ -322,8 +388,9 @@ component RoundButton inherits Rectangle {
     width: 26px;
     height: 26px;
     border-radius: 13px;
-    background: rb-ta.has-hover && root.enabled ? Theme.canvas : Theme.surface;
-    opacity: root.enabled ? (rb-ta.pressed ? 0.6 : 1) : 0.35;
+    // one step up the surface ramp on hover, like x76's small round buttons
+    background: rb-ta.has-hover && root.enabled ? Theme.surface : Theme.surface-2;
+    opacity: root.enabled ? 1 : 0.45;
     Path {
         width: 11px;
         height: 11px;
@@ -389,9 +456,7 @@ component Gem inherits Rectangle {
         viewbox-width: 12;
         viewbox-height: 12;
         commands: "M 6 0 L 12 6 L 6 12 L 0 6 Z";
-        fill: root.tier-key == 6
-            ? @linear-gradient(115deg, #6fe3ff 0%, #9d7bff 35%, #f07ae0 65%, #c6f07a 100%)
-            : Theme.tier-color(root.tier-key);
+        fill: Theme.tier-color(root.tier-key);
     }
 }
 
@@ -590,7 +655,7 @@ component Chart inherits Rectangle {
         viewbox-height: root.ph / 1px;
         commands: ChartMath.step-path(root.c.points, root.pw / 1px, root.ph / 1px, false);
         stroke: root.ink;
-        stroke-width: 1.75px;
+        stroke-width: 1.5px;
     }
     if root.n > 0: Rectangle {
         x: root.pw - 3px;
@@ -696,7 +761,7 @@ component PlayerCardView inherits Rectangle {
     border-radius: 16px;
     border-width: 1px;
     border-color: root.p.flash > 0 && !root.faded ? Theme.positive : root.p.flash < 0 && !root.faded ? Theme.danger : transparent;
-    animate border-color, background { duration: 900ms; }
+    animate border-color, background { duration: 220ms; easing: cubic-bezier(0.22, 0.61, 0.36, 1); }
 
     // a fresh result lights the card up briefly, then fades
     Timer {
@@ -1179,19 +1244,30 @@ component Pill inherits Rectangle {
     in property <bool> on-image;
     in property <bool> shiny;
     border-radius: self.height / 2;
-    background: root.shiny ? transparent : root.on-image ? #ffffff2e : Theme.surface;
-    if root.shiny: RainbowFill { width: parent.width; height: parent.height; border-radius: parent.height / 2; play: pill-ta.has-hover; }
-    pill-ta := TouchArea { }
+    background: root.on-image ? #ffffff2e : Theme.surface;
     HorizontalLayout {
-        padding-left: 9px;
+        padding-left: root.shiny ? 7px : 9px;
         padding-right: 9px;
         padding-top: 2px;
         padding-bottom: 2px;
+        spacing: 5px;
+        // x76 marks supporters with a heart in its danger red
+        if root.shiny: VerticalLayout {
+            alignment: center;
+            Path {
+                width: 10px;
+                height: 9px;
+                viewbox-width: 12;
+                viewbox-height: 11;
+                commands: "M 6 10.5 L 1.5 6 C 0.3 4.8 0.3 2.8 1.5 1.6 C 2.7 0.4 4.6 0.5 6 2 C 7.4 0.5 9.3 0.4 10.5 1.6 C 11.7 2.8 11.7 4.8 10.5 6 Z";
+                fill: Theme.danger;
+            }
+        }
         Mono {
             text: root.text;
             font-size: 10.5px;
-            font-weight: root.shiny ? 600 : 500;
-            color: root.shiny ? #17161a : root.on-image ? #ffffff : Theme.fg-muted;
+            font-weight: 500;
+            color: root.on-image ? #ffffff : Theme.fg-muted;
         }
     }
 }
@@ -1280,8 +1356,9 @@ component ProfileCardView inherits Rectangle {
             Rectangle {
                 width: 88px;
                 height: 88px;
-                border-radius: 44px;
-                background: root.img ? #ffffff38 : Theme.surface;
+                border-radius: 16px;
+                // x76: rounded squares, and a blue square with the initial when there's no picture
+                background: !root.p.has-avatar ? Theme.accent : root.img ? #ffffff38 : Theme.surface;
                 if root.p.has-avatar: SharpPicture {
                     x: 4px;
                     y: 4px;
@@ -1294,7 +1371,7 @@ component ProfileCardView inherits Rectangle {
                     text: root.p.initial;
                     font-size: 34px;
                     font-weight: 600;
-                    color: root.img ? #ffffff : Theme.fg-muted;
+                    color: #ffffff;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
@@ -1321,7 +1398,7 @@ component ProfileCardView inherits Rectangle {
                     Rectangle {
                         width: 18px;
                         height: 18px;
-                        border-radius: 9px;
+                        border-radius: 8px;
                         background: Theme.accent-fg;
                         Path {
                             width: 10px;
@@ -1438,7 +1515,7 @@ component ShareGameTile inherits Rectangle {
                 viewbox-height: spark.height / 1px;
                 commands: ChartMath.step-path(root.g.chart.points, spark.width / 1px, spark.height / 1px, true);
                 fill: root.ink;
-                opacity: 0.14;
+                opacity: 0.1;
             }
             if root.g.has-chart: Path {
                 width: spark.width;
@@ -1484,7 +1561,7 @@ component ShareCardView inherits Rectangle {
     height: 336px;
     border-radius: root.rounded ? 20px : 0px;
     clip: true;
-    background: #18171a;
+    background: #141313;
     // banner strip, fading into the card
     Rectangle {
         y: 0;
@@ -1492,7 +1569,7 @@ component ShareCardView inherits Rectangle {
         clip: true;
         background: @linear-gradient(135deg, #2f2b29 0%, #1d1c1f 100%);
         if root.c.has-banner: SharpPicture { width: parent.width; height: parent.height; use: 2; original: root.banner; }
-        Rectangle { background: @linear-gradient(180deg, #18171a00 45%, #18171a 100%); }
+        Rectangle { background: @linear-gradient(180deg, #14131300 45%, #141313 100%); }
         // brand, top right
         Rectangle {
             x: parent.width - self.width - 16px;
@@ -1527,15 +1604,15 @@ component ShareCardView inherits Rectangle {
         y: 66px;
         width: 92px;
         height: 92px;
-        border-radius: 46px;
-        background: #18171a;
+        border-radius: 18px;
+        background: #141313;
         Rectangle {
             x: 5px;
             y: 5px;
             width: 82px;
             height: 82px;
-            border-radius: 41px;
-            background: #ffffff26;
+            border-radius: 13px;
+            background: root.c.has-avatar ? #ffffff26 : Theme.accent;
             if root.c.has-avatar: SharpPicture { width: parent.width; height: parent.height; use: 3; original: root.avatar; }
             if !root.c.has-avatar: Text {
                 text: root.c.initial;
@@ -1600,7 +1677,7 @@ component SharePanel inherits Rectangle {
     Timer { interval: 16ms; running: root.k < 1; triggered => { root.k = min(1, root.k + 16 / 240); } }
     property <float> ek: 1 - Math.pow(1 - root.k, 3);
     opacity: root.ek;
-    background: #000000a6;
+    background: Theme.canvas.with-alpha(0.78);
     TouchArea { clicked => { root.close(); } }
     panel := Rectangle {
         width: 640px + 48px;
@@ -1633,7 +1710,7 @@ component SharePanel inherits Rectangle {
             HorizontalLayout {
                 spacing: 10px;
                 alignment: start;
-                Button { text: root.busy ? "Saving…" : "Save PNG"; enabled: !root.busy && root.c.ok; clicked => { Actions.card-save(); } }
+                Button { text: root.busy ? "Saving" : "Save PNG"; enabled: !root.busy && root.c.ok; clicked => { Actions.card-save(); } }
                 if root.saved: Button { text: "Show in folder"; kind: 1; clicked => { Actions.card-reveal(); } }
             }
             if root.status != "": Text { text: root.status; font-size: 12.5px; color: root.status-error ? Theme.danger : Theme.fg-muted; wrap: word-wrap; }
@@ -1689,7 +1766,7 @@ component LinkProfileRow inherits HorizontalLayout {
                 vertical-alignment: center;
             }
         }
-        VerticalLayout { alignment: center; Button { text: root.busy ? "Linking…" : "Link"; enabled: !root.busy; clicked => { Actions.profile-link(handle-input.text); } } }
+        VerticalLayout { alignment: center; Button { text: root.busy ? "Linking" : "Link"; enabled: !root.busy; clicked => { Actions.profile-link(handle-input.text); } } }
         VerticalLayout { alignment: center; Button { text: "Cancel"; kind: 1; clicked => { root.open = false; } } }
     }
     if root.error != "": Text { text: root.error; font-size: 13px; color: Theme.danger; vertical-alignment: center; }
@@ -1699,7 +1776,7 @@ component LinkProfileRow inherits HorizontalLayout {
 component StatTile inherits Rectangle {
     in property <StatChange> c;
     background: Theme.surface;
-    border-radius: 10px;
+    border-radius: 12px;
     VerticalLayout {
         padding: 12px;
         spacing: 4px;
@@ -1803,7 +1880,7 @@ component EventPanel inherits Rectangle {
     Timer { interval: 16ms; running: root.k < 1; triggered => { root.k = min(1, root.k + 16 / 240); } }
     property <float> ek: 1 - Math.pow(1 - root.k, 3);
     opacity: root.ek;
-    background: #000000a6;
+    background: Theme.canvas.with-alpha(0.78);
     // a click outside the panel closes it
     TouchArea { clicked => { Actions.close-event(); } }
     panel := Rectangle {
@@ -1869,7 +1946,7 @@ component EventPanel inherits Rectangle {
                     spacing: 8px;
                     for c in root.d.stats: StatTile { c: c; horizontal-stretch: 1; }
                 }
-                if root.d.fights.length > 0: Eyebrow { text: "FIGHTS FROM THE GAME LOG"; }
+                if root.d.fights.length > 0: Eyebrow { text: "fights from the game log"; font-size: 10.5px; color: Theme.fg-faint; }
                 for f in root.d.fights: FightCard { f: f; game: root.d.game; key: root.d.key; }
                 Text { text: root.d.hint; font-size: 12px; color: Theme.fg-faint; wrap: word-wrap; }
             }
@@ -1883,7 +1960,7 @@ component RivalTileView inherits Rectangle {
     // the same width for every tile in a row, however long its text
     preferred-width: 100px;
     background: Theme.surface;
-    border-radius: 10px;
+    border-radius: 12px;
     VerticalLayout {
         // a tile with less text keeps its lines at the top, level with its neighbours
         alignment: start;
@@ -1948,7 +2025,7 @@ component RecapPanel inherits Rectangle {
     Timer { interval: 16ms; running: root.k < 1; triggered => { root.k = min(1, root.k + 16 / 240); } }
     property <float> ek: 1 - Math.pow(1 - root.k, 3);
     opacity: root.ek;
-    background: #000000a6;
+    background: Theme.canvas.with-alpha(0.78);
     TouchArea { clicked => { Actions.close-recap(); } }
     panel := Rectangle {
         width: min(640px, root.width - 48px);
@@ -2065,7 +2142,7 @@ component RivalPanel inherits Rectangle {
     Timer { interval: 16ms; running: root.k < 1; triggered => { root.k = min(1, root.k + 16 / 240); } }
     property <float> ek: 1 - Math.pow(1 - root.k, 3);
     opacity: root.ek;
-    background: #000000a6;
+    background: Theme.canvas.with-alpha(0.78);
     TouchArea { clicked => { Actions.close-rival(); } }
     panel := Rectangle {
         width: min(640px, root.width - 48px);
@@ -2139,9 +2216,9 @@ component RivalPanel inherits Rectangle {
                     padding-left: 12px;
                     padding-right: 14px;
                     spacing: 12px;
-                    Eyebrow { text: "FIGHTS"; horizontal-stretch: 1; }
-                    if root.r.has-acc: Eyebrow { text: "YOU · THEM"; horizontal-stretch: 0; min-width: 76px; horizontal-alignment: right; }
-                    Eyebrow { text: "THEIR ELO THEN"; horizontal-stretch: 0; min-width: 120px; horizontal-alignment: right; }
+                    Eyebrow { text: "fights"; font-size: 10.5px; color: Theme.fg-faint; horizontal-stretch: 1; }
+                    if root.r.has-acc: Eyebrow { text: "you · them"; font-size: 10.5px; color: Theme.fg-faint; horizontal-stretch: 0; min-width: 76px; horizontal-alignment: right; }
+                    Eyebrow { text: "their elo then"; font-size: 10.5px; color: Theme.fg-faint; horizontal-stretch: 0; min-width: 120px; horizontal-alignment: right; }
                 }
                 VerticalLayout {
                     spacing: 6px;
@@ -2168,19 +2245,14 @@ component ServerRowView inherits Rectangle {
         spacing: 12px;
         VerticalLayout {
             alignment: center;
-            horizontal-stretch: 0;
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
-                background: !root.r.online ? Theme.fg-faint : root.r.players > 0 ? Theme.positive : Theme.fg-muted;
-            }
-        }
-        VerticalLayout {
-            alignment: center;
             spacing: 2px;
             horizontal-stretch: 1;
-            Text { text: root.r.name; font-size: 14.5px; font-weight: 600; letter-spacing: -0.15px; color: Theme.fg; overflow: elide; min-width: 0px; }
+            HorizontalLayout {
+                spacing: 10px;
+                Text { text: root.r.name; font-size: 15px; font-weight: 600; letter-spacing: -0.15px; color: Theme.fg; overflow: elide; min-width: 0px; horizontal-stretch: 1; }
+                // x76 says it in a word, not a dot
+                Mono { text: root.r.online ? "online" : "offline"; font-size: 10.5px; color: root.r.online ? Theme.positive : Theme.fg-faint; horizontal-stretch: 0; }
+            }
             Mono { text: root.r.online ? (root.r.region + " · " + root.r.map) : (root.r.region + " · offline"); overflow: elide; min-width: 0px; }
         }
         VerticalLayout {
@@ -2193,18 +2265,17 @@ component ServerRowView inherits Rectangle {
                 Text { text: root.r.players; font-size: 17px; font-weight: 600; color: Theme.fg; }
                 VerticalLayout { alignment: end; padding-bottom: 2px; Mono { text: "/\{root.r.max}"; } }
             }
-            Rectangle {
+            // one slot per player, filled in x76 blue (x76's server cards)
+            // (big servers get at most 24 segments, each a share of the slots)
+            HorizontalLayout {
+                property <int> slots: max(1, min(root.r.max, 24));
+                property <int> lit: root.r.max <= 24 ? root.r.players : root.r.players > 0 ? max(1, round(root.r.players / max(1, root.r.max) * 24)) : 0;
                 width: 120px;
-                height: 5px;
-                border-radius: 2.5px;
-                background: Theme.surface;
-                Rectangle {
-                    x: 0;
-                    width: parent.width * root.r.fill;
-                    height: parent.height;
-                    border-radius: 2.5px;
-                    background: root.full ? Theme.warning : Theme.accent-fg;
-                    animate width { duration: 600ms; easing: ease-out; }
+                height: 6px;
+                spacing: self.slots > 16 ? 2px : 3px;
+                for slot in self.slots: Rectangle {
+                    border-radius: 2px;
+                    background: slot < parent.lit ? Theme.accent : Theme.fg.with-alpha(0.1);
                 }
             }
         }
@@ -2286,22 +2357,34 @@ component Switch inherits Rectangle {
     in property <bool> on;
     in property <bool> enabled: true;
     callback toggled(on: bool);
-    width: 40px;
-    height: 22px;
-    border-radius: 11px;
-    background: root.on ? Theme.positive : Theme.surface-2;
-    border-width: 1px;
-    border-color: root.on ? Theme.positive : Theme.line-2;
-    opacity: root.enabled ? 1 : 0.5;
-    animate background { duration: 150ms; }
+    width: 26px;
+    height: 15px;
+    border-radius: 7.5px;
+    background: root.on ? Theme.accent : Theme.fg.with-alpha(0.14);
+    opacity: root.enabled ? 1 : 0.45;
+    // the knob springs across (x76's toggle); 0 = off, 1 = on
+    property <float> pos;
+    property <float> speed;
+    init => { self.pos = root.on ? 1 : 0; }
+    Timer {
+        interval: 16ms;
+        running: abs(root.pos - (root.on ? 1 : 0)) > 0.003 || abs(root.speed) > 0.003;
+        triggered => {
+            root.speed = Theme.spring-step(root.pos, root.on ? 1 : 0, root.speed);
+            root.pos += root.speed;
+            if (abs(root.pos - (root.on ? 1 : 0)) < 0.003 && abs(root.speed) < 0.003) {
+                root.pos = root.on ? 1 : 0;
+                root.speed = 0;
+            }
+        }
+    }
     Rectangle {
-        y: 3px;
-        x: root.on ? root.width - 19px : 3px;
-        width: 16px;
-        height: 16px;
-        border-radius: 8px;
-        background: root.on ? #ffffff : Theme.fg-muted;
-        animate x { duration: 150ms; }
+        y: 2px;
+        x: 2px + root.pos * 11px;
+        width: 11px;
+        height: 11px;
+        border-radius: 5.5px;
+        background: Theme.surface;
     }
     TouchArea {
         mouse-cursor: root.enabled ? pointer : default;
@@ -2316,9 +2399,7 @@ component Select inherits Rectangle {
     callback chosen(index: int);
     height: 34px;
     border-radius: 8px;
-    border-width: 1px;
-    border-color: pick-ta.has-hover ? Theme.line-2 : Theme.line-1;
-    background: Theme.canvas;
+    background: pick-ta.has-hover ? Theme.surface-2.mix(Theme.surface, 0.6) : Theme.surface-2;
     HorizontalLayout {
         padding-left: 12px;
         padding-right: 12px;
@@ -2342,7 +2423,7 @@ component Select inherits Rectangle {
                 viewbox-height: 6;
                 commands: "M 1 1 L 5 5 L 9 1";
                 stroke: Theme.fg;
-                stroke-width: 1.4px;
+                stroke-width: 1.5px;
             }
         }
     }
@@ -2365,7 +2446,7 @@ component Select inherits Rectangle {
             background: Theme.canvas;
             border-radius: 8px;
             border-width: 1px;
-            border-color: Theme.line-2;
+            border-color: Theme.line-1;
             clip: true;
             list := ScrollView {
                 content-width: self.visible-width;
@@ -2454,13 +2535,13 @@ component StatusLine inherits HorizontalLayout {
             width: 7px;
             height: 7px;
             border-radius: 3.5px;
-            background: root.state == 2 ? Theme.positive : root.state == 1 ? Theme.accent-fg : root.state == 3 ? Theme.danger : Theme.fg-faint;
+            background: root.state == 2 ? Theme.positive : root.state == 1 ? Theme.accent-fg : root.state == 3 ? Theme.warning : Theme.fg-faint;
         }
     }
     Text {
         text: root.text;
         font-size: 13px;
-        color: root.state == 3 ? Theme.danger : Theme.fg-muted;
+        color: root.state == 3 ? Theme.warning : Theme.fg-muted;
         wrap: word-wrap;
         horizontal-stretch: 1;
     }
@@ -2561,7 +2642,7 @@ component MediaView inherits Rectangle {
             width: parent.width;
             height: parent.height;
             horizontal-alignment: center;
-            text: root.m.failed ? "(" + root.m.alt + ")" : "loading picture…";
+            text: root.m.failed ? "(" + root.m.alt + ")" : "loading picture";
             color: Theme.fg-faint;
         }
     }
@@ -2622,7 +2703,7 @@ component ChangelogMenu inherits Rectangle {
                         height: 30px;
                         border-radius: 15px;
                         background: i == root.selected ? Theme.action-bg : chip-ta.has-hover ? Theme.surface-2 : Theme.surface;
-                        animate background { duration: 140ms; }
+                        animate background { duration: 120ms; easing: cubic-bezier(0.22, 0.61, 0.36, 1); }
                         HorizontalLayout {
                             padding-left: 12px;
                             padding-right: 12px;
@@ -2772,7 +2853,7 @@ component SettingsPanel inherits Rectangle {
     Timer { interval: 16ms; running: root.k < 1; triggered => { root.k = min(1, root.k + 16 / 240); } }
     property <float> ek: 1 - Math.pow(1 - root.k, 3);
     opacity: root.ek;
-    background: #000000a6;
+    background: Theme.canvas.with-alpha(0.78);
     TouchArea { clicked => { root.close(); } }
     panel := Rectangle {
         width: min(780px, root.width - 48px);
@@ -2828,7 +2909,7 @@ component SettingsPanel inherits Rectangle {
                     tabbody1 := VerticalLayout {
                         y: (1 - parent.ek) * 8px;
                     spacing: 16px;
-                    Eyebrow { text: "YOUR PLAYERS"; }
+                    SectionTitle { text: "Your players"; }
                     Text {
                         text: "The share card shows these players' numbers (and Discord does, if you turn it on under Experimental). Track yourself on the Ladders tab, then pick yourself here.";
                         font-size: 13px;
@@ -2851,7 +2932,7 @@ component SettingsPanel inherits Rectangle {
                         }
                     }
                     Rectangle { height: 1px; background: Theme.line-1; }
-                    Eyebrow { text: "R5RELOADED OPPONENTS"; }
+                    SectionTitle { text: "R5Reloaded opponents"; }
                     SettingRow {
                         on: root.d.r5-patch;
                         title: "Log who I fight in R5Reloaded";
@@ -2865,7 +2946,7 @@ component SettingsPanel inherits Rectangle {
                         Field { mono: true; placeholder: "the folder with r5apex.exe, e.g. C:\\R5R Library\\LIVE"; edited(t) => { Actions.r5-path(t); } }
                     }
                     Rectangle { height: 1px; background: Theme.line-1; }
-                    Eyebrow { text: "QUAKE LIVE OPPONENTS"; }
+                    SectionTitle { text: "Quake Live opponents"; }
                     SettingRow {
                         on: root.d.ql-log;
                         title: "Log who I fight in Quake Live";
@@ -2874,7 +2955,7 @@ component SettingsPanel inherits Rectangle {
                     }
                     StatusLine { text: root.qllog-status; state: root.qllog-state; }
                     Rectangle { height: 1px; background: Theme.line-1; }
-                    Eyebrow { text: "SESSION RECAP"; }
+                    SectionTitle { text: "Session recap"; }
                     SettingRow {
                         on: root.d.recap-auto;
                         title: "Show a recap when I close a game";
@@ -2882,7 +2963,7 @@ component SettingsPanel inherits Rectangle {
                         toggled(v) => { Actions.recap-auto(v); }
                     }
                     Rectangle { height: 1px; background: Theme.line-1; }
-                    Eyebrow { text: "NOTIFICATIONS"; }
+                    SectionTitle { text: "Notifications"; }
                     SettingRow {
                         on: root.d.notify;
                         title: "Show notifications over my games";
@@ -2912,7 +2993,7 @@ component SettingsPanel inherits Rectangle {
                         color: Theme.fg-muted;
                         wrap: word-wrap;
                     }
-                    Eyebrow { text: "RICH PRESENCE"; }
+                    SectionTitle { text: "Rich Presence"; }
                     SettingRow {
                         on: root.d.rpc;
                         title: "Show my x76 rank on Discord while I play";
@@ -2922,14 +3003,14 @@ component SettingsPanel inherits Rectangle {
                     StatusLine { text: root.rpc-status; state: root.rpc-state; }
                     Mono { text: root.d.rpc-app; font-size: 11px; color: Theme.fg-faint; wrap: word-wrap; }
                     Rectangle { height: 1px; background: Theme.line-1; }
-                    Eyebrow { text: "DISCORD PROFILE WIDGET"; }
+                    SectionTitle { text: "Discord profile widget"; }
                     Text {
                         text: "Already have a Discord app with a profile widget? x76tracker can fill the widget's User Data fields with your x76 stats. Discord stopped giving widgets to new apps, so this only works with an app that got one before the cutoff.";
                         font-size: 14px;
                         color: Theme.fg-muted;
                         wrap: word-wrap;
                     }
-                    Eyebrow { text: "YOUR APP"; }
+                    SectionTitle { text: "Your app"; }
                     HorizontalLayout {
                         spacing: 12px;
                         VerticalLayout {
@@ -2968,7 +3049,7 @@ component SettingsPanel inherits Rectangle {
                     HorizontalLayout {
                         spacing: 10px;
                         alignment: start;
-                        Button { text: root.layout-busy ? "Reading…" : "Read widget layout"; enabled: !root.layout-busy; clicked => { Actions.widget-layout(); } }
+                        Button { text: root.layout-busy ? "Reading" : "Read widget layout"; enabled: !root.layout-busy; clicked => { Actions.widget-layout(); } }
                         Button { text: "Developer Portal"; kind: 1; clicked => { Actions.open-url("https://discord.com/developers/applications"); } }
                     }
                     if root.layout-status != "": Text { text: root.layout-status; font-size: 13px; color: root.layout-error ? Theme.danger : Theme.fg-muted; wrap: word-wrap; }
@@ -2988,7 +3069,7 @@ component SettingsPanel inherits Rectangle {
                     }
                     if root.d.slots.length > 0: VerticalLayout {
                         spacing: 8px;
-                        Eyebrow { text: "FIELDS X76TRACKER FILLS"; }
+                        SectionTitle { text: "Fields x76tracker fills"; }
                         for slot[i] in root.d.slots: SlotRow {
                             slot: slot;
                             preview: i < root.previews.length ? root.previews[i] : "";
@@ -3002,7 +3083,7 @@ component SettingsPanel inherits Rectangle {
                     }
                     if root.d.statics.length > 0: VerticalLayout {
                         spacing: 8px;
-                        Eyebrow { text: "FIXED IN DISCORD'S WIDGET EDITOR"; }
+                        SectionTitle { text: "Fixed in Discord's widget editor"; }
                         for st in root.d.statics: HorizontalLayout {
                             spacing: 12px;
                             Mono { text: st.surface + " · " + st.name; width: 150px; overflow: elide; }
@@ -3094,7 +3175,7 @@ component CaptionButton inherits Rectangle {
     height: 32px;
     border-radius: 8px;
     background: cb-ta.has-hover ? (root.close ? Theme.danger : Theme.surface-2) : transparent;
-    animate background { duration: 120ms; }
+    animate background { duration: 120ms; easing: cubic-bezier(0.22, 0.61, 0.36, 1); }
     Path {
         width: 11px;
         height: 11px;
@@ -3102,7 +3183,7 @@ component CaptionButton inherits Rectangle {
         viewbox-height: 12;
         commands: root.icon;
         stroke: cb-ta.has-hover && root.close ? #ffffff : Theme.fg-muted;
-        stroke-width: 1.3px;
+        stroke-width: 1.5px;
     }
     cb-ta := TouchArea {
         clicked => { root.clicked(); }
@@ -3283,7 +3364,7 @@ export component AppWindow inherits Window {
     in property <[SearchResult]> r5-results;
     in property <string> ql-search-msg;
     in property <string> r5-search-msg;
-    in property <string> live-text: "starting…";
+    in property <string> live-text: "starting";
     in property <int> live-state; // 0 idle, 1 live, 2 checking, 3 error
     in property <int> interval-idx: 1;
     in property <[string]> intervals: ["every 30s", "every 1 min", "every 2 min", "every 5 min"];
@@ -3417,7 +3498,7 @@ export component AppWindow inherits Window {
                             width: 7px;
                             height: 7px;
                             border-radius: 3.5px;
-                            background: root.live-state == 1 ? Theme.positive : root.live-state == 2 ? Theme.accent-fg : root.live-state == 3 ? Theme.danger : Theme.fg-faint;
+                            background: root.live-state == 1 ? Theme.positive : root.live-state == 2 ? Theme.accent-fg : root.live-state == 3 ? Theme.warning : Theme.fg-faint;
                             // breathes while a check is running
                             opacity: root.live-state == 2 ? 0.35 + 0.65 * (1 + Math.sin(animation-tick() / 1ms * 0.4deg)) / 2 : 1;
                         }
@@ -3447,7 +3528,7 @@ export component AppWindow inherits Window {
                                     viewbox-height: 6;
                                     commands: "M 1 1 L 5 5 L 9 1";
                                     stroke: Theme.fg;
-                                    stroke-width: 1.4px;
+                                    stroke-width: 1.5px;
                                 }
                             }
                         }
@@ -3504,18 +3585,10 @@ export component AppWindow inherits Window {
                     Rectangle {
                         height: 28px;
                         border-radius: 14px;
-                        background: up-ta.has-hover ? Theme.accent-fg.darker(0.12) : Theme.accent-fg;
-                        // a slow pulse around it, so a new version gets noticed
-                        Rectangle {
-                            x: -4px;
-                            y: -4px;
-                            width: parent.width + 8px;
-                            height: parent.height + 8px;
-                            border-radius: self.height / 2;
-                            border-width: 2px;
-                            border-color: Theme.accent-fg;
-                            opacity: 0.1 + 0.45 * (1 + Math.sin(animation-tick() / 1ms * 0.18deg)) / 2;
-                        }
+                        background: up-ta.has-hover ? Theme.accent-pressed : Theme.accent;
+                        // a soft blue glow that comes and goes, so a new version gets noticed (x76's glow pulse)
+                        drop-shadow-blur: 22px;
+                        drop-shadow-color: #3186ff.with-alpha(0.45 * (1 - Math.cos(animation-tick() / 1ms * 0.1286deg)) / 2);
                         HorizontalLayout {
                             padding-left: 12px;
                             padding-right: 12px;
@@ -3523,7 +3596,7 @@ export component AppWindow inherits Window {
                                 text: "Update " + root.updates.available;
                                 font-size: 12.5px;
                                 font-weight: 600;
-                                color: Theme.dark ? #17161a : #ffffff;
+                                color: #ffffff;
                                 vertical-alignment: center;
                             }
                         }
@@ -3683,6 +3756,7 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 0;
                                 Pills {
                                     options: ["Today", "Last 24h", "All tracked"];
+                                    small: true;
                                     selected: root.period;
                                     chosen(i) => { Actions.period(i); }
                                 }

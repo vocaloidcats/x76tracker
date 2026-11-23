@@ -28,6 +28,7 @@ Each version's section is shown in the app (What's new) and used as its GitHub r
 - **Quake Live stats:** your Quake Live card shows your average accuracy over the period's fights.
 - **Discord is experimental:** Rich Presence and the profile widget moved to their own tab, Settings → Experimental. Both are off until you turn them on, and nothing changes if you already use them.
   ![Settings → Experimental: Rich Presence and the Discord profile widget](docs/changelog/2.3.0-experimental@2x.png)
+- **Looks more like x76.gg:** switches are x76 blue, smaller, and their knob springs across. Avatars are rounded squares, and supporters get x76's red heart. The Today / Last 24h / All tracked and points / elo switches are x76's mono filter pills, and the chosen option slides over. Settings headings are in sentence case. Servers show online or offline as a word, with one blue segment per player slot. Pop-ups dim the window in its own warm colour instead of black, and loading messages lose their "…".
 
 ### Fixed
 
