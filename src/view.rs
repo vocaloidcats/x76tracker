@@ -712,7 +712,7 @@ pub fn recap_page(core: &Core, idx: usize) -> Option<RecapPage> {
         tiles.push(RivalTile {
             label: s("POINTS"),
             value: s(signed(d, format!("{}P", thousands((b - a).abs())))),
-            sub: s(format!("{}P → {}P", thousands(a), thousands(b))),
+            sub: s(format!("from {}P\nto {}P", thousands(a), thousands(b))),
             dir: d.signum() as i32,
         });
     }
@@ -721,7 +721,7 @@ pub fn recap_page(core: &Core, idx: usize) -> Option<RecapPage> {
         tiles.push(RivalTile {
             label: s("ELO"),
             value: s(signed(if d.abs() < 0.005 { 0.0 } else { d }, two_decimals(d.abs()))),
-            sub: s(format!("{} → {}", two_decimals(a), two_decimals(b))),
+            sub: s(format!("from {}\nto {}", two_decimals(a), two_decimals(b))),
             dir: if d.abs() < 0.005 { 0 } else { d.signum() as i32 },
         });
     }
@@ -730,7 +730,7 @@ pub fn recap_page(core: &Core, idx: usize) -> Option<RecapPage> {
         tiles.push(RivalTile {
             label: s("RANK"),
             value: s(if up == 0 { "same".to_string() } else { format!("{}{}", if up > 0 { "+" } else { "−" }, thousands(up.abs())) }),
-            sub: s(format!("place{} · #{} → #{}", if up.abs() == 1 { "" } else { "s" }, thousands(a), thousands(b))),
+            sub: s(format!("place{}\n#{} → #{}", if up.abs() == 1 { "" } else { "s" }, thousands(a), thousands(b))),
             dir: up.signum() as i32,
         });
     }
@@ -742,14 +742,14 @@ pub fn recap_page(core: &Core, idx: usize) -> Option<RecapPage> {
         let sub = if theirs.is_empty() {
             format!("{} fights", accs.len())
         } else {
-            format!("opponents {} · {} fights", pct(theirs.iter().sum::<f64>() / theirs.len() as f64), accs.len())
+            format!("opponents {}\n{} fights", pct(theirs.iter().sum::<f64>() / theirs.len() as f64), accs.len())
         };
         tiles.push(RivalTile { label: s("ACCURACY"), value: s(pct(mine)), sub: s(sub), dir: 0 });
     } else if wins + losses > 0 {
         tiles.push(RivalTile {
             label: s("WIN RATE"),
             value: s(format!("{:.0}%", wins as f64 * 100.0 / (wins + losses) as f64)),
-            sub: s(format!("{wins} of {} fights", wins + losses)),
+            sub: s(format!("{wins} of {}\nfights", wins + losses)),
             dir: 0,
         });
     }
@@ -914,7 +914,7 @@ pub fn rival_page(core: &Core, key: &str, opponent: &str) -> Option<RivalPage> {
     let mut tiles = vec![RivalTile {
         label: s("RECORD"),
         value: s(format!("{wins}–{losses}")),
-        sub: s(format!("{:.0}% won · {} fight{}", wins as f64 * 100.0 / n as f64, n, if n == 1 { "" } else { "s" })),
+        sub: s(format!("{:.0}% won\n{} fight{}", wins as f64 * 100.0 / n as f64, n, if n == 1 { "" } else { "s" })),
         dir: (wins - losses).signum() as i32,
     }];
     if let Some(e) = their_elo {
@@ -925,7 +925,7 @@ pub fn rival_page(core: &Core, key: &str, opponent: &str) -> Option<RivalPage> {
             None => String::new(),
         };
         if let Some(m) = my_elo {
-            sub = format!("{sub} · {:.0}% on paper", win_chance(m, e) * 100.0);
+            sub = format!("{sub}\n{:.0}% on paper", win_chance(m, e) * 100.0);
         }
         tiles.push(RivalTile { label: s("ELO NOW"), value: s(thousands(e.round() as i64)), sub: s(sub), dir: 0 });
     }
@@ -936,7 +936,7 @@ pub fn rival_page(core: &Core, key: &str, opponent: &str) -> Option<RivalPage> {
         tiles.push(RivalTile {
             label: s("ACCURACY"),
             value: s(format!("{} vs {}", pct(me), pct(them))),
-            sub: s(format!("you vs them, {} fight{}", accs.len(), if accs.len() == 1 { "" } else { "s" })),
+            sub: s(format!("you vs them\n{} fight{}", accs.len(), if accs.len() == 1 { "" } else { "s" })),
             dir: if (me - them).abs() < 0.5 { 0 } else if me > them { 1 } else { -1 },
         });
     } else {
@@ -944,7 +944,7 @@ pub fn rival_page(core: &Core, key: &str, opponent: &str) -> Option<RivalPage> {
         tiles.push(RivalTile { label: s("UPSETS"), value: s(format!("{uw} · {ul}")), sub: s("won · lost"), dir: 0 });
     }
     let first = fights.last().unwrap();
-    tiles.push(RivalTile { label: s("FIRST MET"), value: s(short_when(first.t)), sub: s(format!("last {}", clock_day(newest.t))), dir: 0 });
+    tiles.push(RivalTile { label: s("FIRST MET"), value: s(short_when(first.t)), sub: s(format!("last met\n{}", clock_day(newest.t))), dir: 0 });
 
     let rows: Vec<RivalFight> = fights
         .iter()

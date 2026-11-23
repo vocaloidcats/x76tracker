@@ -12,6 +12,16 @@ Each version's section is shown in the app (What's new) and used as its GitHub r
   ![Quake Live fights on the board, with your accuracy over the last 24 hours](docs/changelog/2.3.0-ql-board@2x.png)
 - **Console log switch:** Settings → General → Log who I fight in Quake Live adds set logfile 2 to Quake Live's autoexec.cfg, so the game saves its console to qconsole.log for x76tracker to read. Switching it off takes the line out again. To start without restarting the game, type \set logfile 2 in its console.
   ![The Quake Live opponents switch in Settings](docs/changelog/2.3.0-ql-settings@2x.png)
+- **Rivals:** click an opponent's name in a result's fights, or in your card's footer, to see your head-to-head with them. It shows your all-time record and their Elo now. You also get both players' accuracy in Quake Live or the upsets in R5Reloaded, when you first met, and every fight between you.
+  ![A head-to-head with one opponent: the all-time record, their Elo, upsets and first meeting, then every fight](docs/changelog/2.3.0-rival@2x.png)
+- **Nemesis and favourite victim:** your card's footer names the opponent who beat you most in the period and the one you beat most, with your record against each. Click either name for your head-to-head with them.
+  ![A card's footer: last session, nemesis and favourite victim with the record against each](docs/changelog/2.3.0-nemesis@2x.png)
+- **Session recap:** x76tracker notices when R5Reloaded or Quake Live starts and closes. When the game closes, it shows a summary of the session: wins and losses, tier change, points, Elo, rank and accuracy. It also names your best win, nemesis, favourite victim, upsets and who you fought most. Step back through older sessions, or open the last one from your card's last session link. You can turn the recap off in Settings → General.
+  ![A session recap: wins and losses, points, Elo and rank before and after, the best win, nemesis and who you fought most](docs/changelog/2.3.0-recap@2x.png)
+- **Notifications:** a small card in x76tracker's own style slides in at the bottom right and leaves by itself a few seconds later. It shows up when your tier changes, when you reach a rank milestone (top 100, top 50 and so on), when you pass a player you track or one passes you, and when a session ends. It shows over your game without taking focus, and clicking it brings up x76tracker. Notifications are off until you turn them on in Settings → General, where Preview shows you one.
+  ![A notification: the Diamond III emblem, "Diamond III, up from Diamond IV · R5Reloaded"](docs/changelog/2.3.0-notification@2x.png)
+- **Compact mode:** the new button in the title bar opens a small card that stays on top of other windows. It shows your players' tier, rank and Elo, the change this session (or over 48 hours), the last fight and your streak. Drag it anywhere and it stays there next time. Double-click it to bring up x76tracker.
+  ![Compact mode: each game's tier emblem, rank, Elo and change, the last fight and the streak](docs/changelog/2.3.0-compact@2x.png)
 
 ### Improved
 

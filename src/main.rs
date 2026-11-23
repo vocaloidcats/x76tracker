@@ -4,9 +4,11 @@
 //!   x76tracker.exe                            normal start
 //!   x76tracker.exe --data-dir D:\x76          keep history somewhere else
 //!   x76tracker.exe --screenshot out.png [--size 1440x1000] [--light|--dark] [--hover x,y] [--offline]
-//!                  [--tab servers] [--settings general|widget|updates] [--preview-update 2.3.0]
+//!                  [--tab servers] [--settings general|experimental|updates] [--preview-update 2.3.0]
 //!                  [--whats-new N] [--record FRAMES [--fps 20] [--crop x,y,w,h] [--click-at F] [--hover-at F]]
 //!                                             (--record writes an animated PNG)
+//!                  [--overlay toast|mini [--note "title|body|tier|dir"]]
+//!                                             (a notification or compact mode on its own)
 //!   x76tracker.exe --card out.png             the share card alone, as a PNG
 //!                                             render the window to a PNG without showing it
 #![windows_subsystem = "windows"]
@@ -1655,6 +1657,82 @@ mod screenshot {
         pub record: Option<Record>,
         /// pixels per point (2 = twice the resolution; size, clicks and crops stay in points)
         pub scale: f32,
+        /// draw a notification ("toast") or compact mode ("mini") instead of the main window
+        pub overlay: Option<String>,
+        /// the notification to draw: "title|body|tier|dir" (dir 1 good news, -1 bad, 0 neither)
+        pub note: Option<String>,
+    }
+
+    /// A notification or compact mode on its own, at its own size, as a PNG.
+    fn overlay_shot(window: &MinimalSoftwareWindow, shared: &Shared, kind: &str, o: &Options) -> Result<(), Box<dyn std::error::Error>> {
+        let dark = o.theme.unwrap_or(true);
+        let cache = shared.lock().data_file.with_file_name("ranks");
+        let icons: Vec<slint::Image> = ranks::load(&cache).into_iter().map(|px| px.map(slint::Image::from_rgba8).unwrap_or_default()).collect();
+        let icons = slint::ModelRc::new(slint::VecModel::from(icons));
+        let scale = o.scale.clamp(0.5, 4.0);
+        let toast;
+        let mut mini: Option<Mini> = None;
+        let (win, size): (&slint::Window, (f32, f32)) = match kind {
+            "toast" => {
+                let t = Toast::new()?;
+                t.global::<Theme>().set_dark(dark);
+                t.global::<RankIcons>().set_icons(icons);
+                t.global::<RankIcons>().set_ready(true);
+                let spec = o.note.clone().unwrap_or_else(|| "Notifications are on|This is how they look over a game.|Diamond III|1".into());
+                let mut f = spec.split('|');
+                t.set_heading(f.next().unwrap_or_default().into());
+                t.set_body(f.next().unwrap_or_default().into());
+                let tier = f.next().unwrap_or_default();
+                t.set_tier_key(if tier.is_empty() { -1 } else { view::tier_key(tier) });
+                t.set_dir(f.next().and_then(|d| d.trim().parse().ok()).unwrap_or(0));
+                toast = t;
+                (toast.window(), (360.0, 76.0))
+            }
+            "mini" => {
+                let m = Mini::new()?;
+                m.global::<Theme>().set_dark(dark);
+                m.global::<RankIcons>().set_icons(icons);
+                m.global::<RankIcons>().set_ready(true);
+                m.set_rows(slint::ModelRc::new(slint::VecModel::from(view::mini_rows(&shared.lock()))));
+                mini = Some(m);
+                // its height is known once it has been laid out (rows and lines fill in when drawn)
+                (mini.as_ref().unwrap().window(), (330.0, 0.0))
+            }
+            other => return Err(format!("--overlay takes toast or mini, not {other}").into()),
+        };
+        if scale != 1.0 {
+            win.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+        }
+        let mut size = size;
+        if size.1 == 0.0 {
+            window.set_size(slint::PhysicalSize::new((size.0 * scale).round() as u32, (900.0 * scale).round() as u32));
+            win.show()?;
+            let mut scratch = vec![PremultipliedRgbaColor::default(); ((size.0 * scale).round() * (900.0 * scale).round()) as usize];
+            advance(100);
+            window.request_redraw();
+            window.draw_if_needed(|r| {
+                r.render(&mut scratch, (size.0 * scale).round() as usize);
+            });
+            size.1 = mini.as_ref().map_or(900.0, |m| m.get_natural_height());
+        }
+        let (w, h) = ((size.0 * scale).round() as u32, (size.1 * scale).round() as u32);
+        window.set_size(slint::PhysicalSize::new(w, h));
+        win.show()?;
+        let mut buf = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
+        for _ in 0..3 {
+            advance(700);
+            window.request_redraw();
+            window.draw_if_needed(|r| {
+                r.render(&mut buf, w as usize);
+            });
+        }
+        let rgba = region(&buf, w, (0, 0, w, h));
+        let file = std::io::BufWriter::new(std::fs::File::create(&o.out)?);
+        let mut enc = png::Encoder::new(file, w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header()?.write_image_data(&rgba)?;
+        Ok(())
     }
 
     pub fn run(data_file: PathBuf, o: Options) -> Result<(), Box<dyn std::error::Error>> {
@@ -1679,6 +1757,9 @@ mod screenshot {
         shared.check_r5_patch(false);
         shared.scan_ql(&mut qllog::Tail::default());
         shared.check_ql_log();
+        if let Some(kind) = &o.overlay {
+            return overlay_shot(&window, &shared, kind, &o);
+        }
         let saved_handle = shared.lock().setting_str("x76Handle");
         let pics = if o.card {
             // the card only needs the profile and its pictures, not fresh ladders
@@ -1941,6 +2022,8 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                     board_at: arg_value(&args, "--board-at").and_then(|v| v.parse().ok()),
                 }),
                 scale: arg_value(&args, "--scale").and_then(|v| v.parse().ok()).unwrap_or(1.0),
+                overlay: arg_value(&args, "--overlay"),
+                note: arg_value(&args, "--note"),
             },
         );
     }
@@ -1967,6 +2050,8 @@ fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 whats_new: None,
                 record: None,
                 scale: 2.0,
+                overlay: None,
+                note: None,
             },
         );
     }

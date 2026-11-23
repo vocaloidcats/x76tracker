@@ -24,7 +24,7 @@ $shots = [ordered]@{
     "ladders"          = @()
     "result-detail"    = @("--detail")
     "servers"          = @("--tab", "servers")
-    "settings-general" = @("--settings", "general")
+    "settings-general" = @("--settings", "general", "--size", "1440x1150")
     "settings-widget"  = @("--settings", "experimental", "--size", "1440x1500")
     "settings-updates" = @("--settings", "updates")
 }

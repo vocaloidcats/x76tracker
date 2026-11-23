@@ -1833,9 +1833,13 @@ component EventPanel inherits Rectangle {
 // ---------------------------------------------------------------- head-to-head
 component RivalTileView inherits Rectangle {
     in property <RivalTile> t;
+    // the same width for every tile in a row, however long its text
+    preferred-width: 100px;
     background: Theme.surface;
     border-radius: 10px;
     VerticalLayout {
+        // a tile with less text keeps its lines at the top, level with its neighbours
+        alignment: start;
         padding: 12px;
         spacing: 4px;
         Eyebrow { text: root.t.label; font-size: 10.5px; }
@@ -3128,6 +3132,7 @@ export component Mini inherits Window {
     height: body.preferred-height;
     background: Theme.canvas;
     in property <[MiniRow]> rows;
+    out property <length> natural-height: body.preferred-height;
     callback drag();
     callback dismiss();
     callback open-app();

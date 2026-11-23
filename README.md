@@ -21,6 +21,10 @@ What you get:
 - **Live updates:** cards light up green or red when something changes.
 - **Servers tab:** live player counts on x76's Quake Live and R5Reloaded servers.
 - **Share card:** your profile and ranks as a PNG for Discord or anywhere else (Share card on your profile, then Save PNG).
+- **Rivals:** your head-to-head with any opponent (click their name), and each period's nemesis and favourite victim on your card. These need the opponents switch below.
+- **Session recap:** when R5Reloaded or Quake Live closes, a summary of the session: wins and losses, tier, points, Elo and rank, your best win, nemesis and accuracy.
+- **Notifications (optional):** a small card that slides in over your game, without taking focus, when your tier changes, you reach a rank milestone or you pass a player you track. They're off until you turn them on in Settings → General.
+- **Compact mode:** a small always-on-top card with your tier, rank, Elo and last fight (the button next to Settings in the title bar).
 
 ![A share card: avatar and banner, name and handle, then each game's rank emblem, tier, rank, points, Elo and last 48 hours](docs/images/share-card.png)
 
@@ -55,7 +59,7 @@ Both Discord features are experimental and off until you turn them on, in **Sett
 - **Rich Presence:** while R5Reloaded or Quake Live is running, your Discord status shows your tier, rank, Elo and your last 48 hours. Discord just has to be open on the same PC; there's no login.
 - **Profile widget:** for people who already have a Discord app with a profile widget (Discord no longer gives widgets to new apps). Under **Discord profile widget**, enter the app's Application ID and paste its bot token. x76tracker reads the widget's layout and fills each field set to *User Data* with a stat you pick (current numbers or the last 48 hours), at most every 5 minutes. In a *Collection* layout each item becomes a card with a picture: your x76 rank emblem, or an emoji that follows your results. In a *Progress* layout, the bar shows how far you are through your tier. The token is stored encrypted for your Windows account (`discord-token.bin`) and only sent to Discord.
 
-![Settings, General tab: whose numbers the share card shows, and the R5Reloaded and Quake Live opponents switches](docs/images/settings-general-dark.png)
+![Settings, General tab: whose numbers the share card shows, the R5Reloaded and Quake Live opponents switches, the session recap and notifications](docs/images/settings-general-dark.png)
 
 | Settings → Experimental | What the widget fills in on Discord |
 |---|---|
@@ -66,12 +70,16 @@ Both Discord features are experimental and off until you turn them on, in **Sett
 ```
 x76tracker.exe --data-dir D:\x76            keep history somewhere else
 x76tracker.exe --screenshot out.png [--size 1440x1000] [--light|--dark] [--hover x,y] [--click x,y] [--offline]
-               [--tab servers] [--settings general|widget|updates] [--preview-update 2.3.0]
+               [--tab servers] [--settings general|experimental|updates] [--preview-update 2.3.0]
                                             draw the window into a PNG without showing it
                                             (--preview-update pretends that version is on GitHub)
 x76tracker.exe --screenshot out.png [--whats-new N] [--detail | --detail-upset] [--detail-game ql]
+               [--rival ql|r5] [--recap]
                [--record FRAMES [--fps 20] [--crop x,y,w,h] [--click-at F] [--hover-at F]]
-                                            open What's new or a result; --record writes an animated PNG
+                                            open What's new, a result, a head-to-head or the last
+                                            session's recap; --record writes an animated PNG
+x76tracker.exe --screenshot out.png --overlay toast|mini [--note "title|body|tier|dir"]
+                                            a notification or compact mode on its own
 x76tracker.exe --card out.png              the share card alone, as a 1280×672 PNG
 ```
 
