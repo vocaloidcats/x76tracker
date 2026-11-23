@@ -54,11 +54,25 @@ thread_local! {
     static DISCORD_SIG: RefCell<String> = const { RefCell::new(String::new()) };
     // What's new pictures, decoded (cleared when the menu closes)
     static MEDIA: RefCell<std::collections::HashMap<String, MediaSlot>> = RefCell::new(std::collections::HashMap::new());
+    // resample pictures right away instead of in the background (screenshot mode has no event loop to hand results to)
+    static MEDIA_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 enum MediaSlot {
     Loading,
-    Ready { frames: Vec<slint::Image>, frame_ms: i32, aspect: f32, natural: f32 },
+    Ready {
+        /// the picture as it is (decoded pixels, and the frames made from them)
+        source: Arc<update::Frames>,
+        frames: Vec<slint::Image>,
+        /// the frames resampled to the size it's drawn at, and that width; 0 = none yet
+        scaled: Option<Vec<slint::Image>>,
+        made_for: i32,
+        /// a resample is running
+        pending: bool,
+        frame_ms: i32,
+        aspect: f32,
+        natural: f32,
+    },
     Failed,
 }
 
@@ -66,15 +80,17 @@ enum MediaSlot {
 fn media_view(m: &update::Media) -> ChangeMedia {
     let alt: slint::SharedString = m.alt.as_str().into();
     MEDIA.with(|map| match map.borrow().get(&m.src) {
-        Some(MediaSlot::Ready { frames, frame_ms, aspect, natural }) => ChangeMedia {
+        Some(MediaSlot::Ready { frames, scaled, made_for, frame_ms, aspect, natural, .. }) => ChangeMedia {
             has: true,
             ready: true,
             failed: false,
             alt,
-            frames: slint::ModelRc::new(slint::VecModel::from(frames.clone())),
+            src: m.src.as_str().into(),
+            frames: slint::ModelRc::new(slint::VecModel::from(scaled.as_ref().unwrap_or(frames).clone())),
             frame_ms: *frame_ms,
             aspect: *aspect,
             natural: *natural,
+            made_for: *made_for,
         },
         Some(MediaSlot::Failed) => ChangeMedia { has: true, failed: true, alt, ..Default::default() },
         _ => ChangeMedia { has: true, alt, ..Default::default() },
@@ -90,14 +106,79 @@ fn store_media(src: &str, result: Result<update::Frames, String>) {
             let density = if src.contains("@2x") { 2.0 } else { 1.0 };
             MediaSlot::Ready {
                 frames: f.order.iter().map(|&i| images[i].clone()).collect(),
+                scaled: None,
+                made_for: 0,
+                pending: false,
                 frame_ms: f.frame_ms as i32,
                 aspect: if f.width > 0 { f.height as f32 / f.width as f32 } else { 0.5 },
                 natural: f.width as f32 / density,
+                source: Arc::new(f),
             }
         }
         Err(_) => MediaSlot::Failed,
     };
     MEDIA.with(|m| m.borrow_mut().insert(src.to_string(), slot));
+}
+
+/// A What's new picture is drawn `w` × `h` physical pixels: resample it to exactly that (in the
+/// background), so it isn't thinned out by the renderer's nearest-pixel scaling.
+fn media_size(app: &slint::Weak<AppWindow>, shared: &Arc<Shared>, src: &str, w: i32, h: i32) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let job = MEDIA.with(|map| {
+        let mut map = map.borrow_mut();
+        let Some(MediaSlot::Ready { source, scaled, made_for, pending, .. }) = map.get_mut(src) else { return None };
+        if *pending || *made_for == w {
+            return None;
+        }
+        if w as u32 >= source.width {
+            // drawn at its own size or larger: the picture as it is
+            *scaled = None;
+            *made_for = w;
+            return Some(None);
+        }
+        *pending = true;
+        Some(Some(source.clone()))
+    });
+    let source = match job {
+        None => return,
+        Some(None) => {
+            if let Some(a) = app.upgrade() {
+                refresh(&a, shared);
+            }
+            return;
+        }
+        Some(Some(source)) => source,
+    };
+    let done = move |src: &str, px: Vec<Vec<u8>>| {
+        MEDIA.with(|map| {
+            if let Some(MediaSlot::Ready { source, scaled, made_for, pending, .. }) = map.borrow_mut().get_mut(src) {
+                let images: Vec<slint::Image> = px
+                    .iter()
+                    .map(|p| slint::Image::from_rgba8_premultiplied(slint::SharedPixelBuffer::clone_from_slice(p, w as u32, h as u32)))
+                    .collect();
+                *scaled = Some(source.order.iter().map(|&i| images[i].clone()).collect());
+                *made_for = w;
+                *pending = false;
+            }
+        });
+    };
+    if MEDIA_SYNC.with(|s| s.get()) {
+        done(src, update::resample(&source, w as u32, h as u32));
+        if let Some(a) = app.upgrade() {
+            refresh(&a, shared);
+        }
+        return;
+    }
+    let (weak, s, src) = (app.clone(), shared.clone(), src.to_string());
+    std::thread::spawn(move || {
+        let px = update::resample(&source, w as u32, h as u32);
+        let _ = weak.upgrade_in_event_loop(move |a| {
+            done(&src, px);
+            refresh(&a, &s);
+        });
+    });
 }
 
 /// Loads every picture the What's new menu shows: in the background, or right away (`wait`).
@@ -653,6 +734,10 @@ fn wire(app: &AppWindow, shared: &Arc<Shared>) {
         };
     }
 
+    actions.on_media_size({
+        let (w, s) = ctx!();
+        move |src, width, height| media_size(&w, &s, src.as_str(), width, height)
+    });
     actions.on_period({
         let (w, s) = ctx!();
         move |i| {
@@ -1833,6 +1918,7 @@ mod screenshot {
         show_rank_icons(&app, ranks::load(&cache));
         refresh(&app, &shared);
         if let Some(i) = o.whats_new {
+            MEDIA_SYNC.with(|s| s.set(true));
             load_changelog_media(&app, &shared, true);
             app.set_changelog_index(i);
             app.set_changelog_open(true);

@@ -29,6 +29,11 @@ Each version's section is shown in the app (What's new) and used as its GitHub r
 - **Discord is experimental:** Rich Presence and the profile widget moved to their own tab, Settings → Experimental. Both are off until you turn them on, and nothing changes if you already use them.
   ![Settings → Experimental: Rich Presence and the Discord profile widget](docs/changelog/2.3.0-experimental@2x.png)
 
+### Fixed
+
+- **Sharper pictures in What's new:** they're resized smoothly to the exact size they're shown at. Before, shrinking them dropped pixels, which made their text look thin and jagged. In the picture, the top half is before the fix and the bottom half is now.
+  ![The same part of a picture twice: on top, thin broken letters and a jagged emblem; below, smooth and even](docs/changelog/2.3.0-sharp-pictures.png)
+
 ## 2.2.2
 
 ![A share card: banner, avatar and name, then each game's rank emblem, tier, rank, points, Elo and a 48-hour sparkline](docs/images/share-card.png)

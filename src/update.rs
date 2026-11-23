@@ -475,6 +475,37 @@ pub struct Frames {
     pub order: Vec<usize>,
 }
 
+/// Every frame resampled to `w` × `h` with a Catmull-Rom filter, as premultiplied RGBA (so the
+/// see-through edges of a picture don't pick up dark fringes). Used to draw What's new pictures at
+/// exactly their on-screen size: the software renderer itself scales by taking the nearest pixel.
+pub fn resample(f: &Frames, w: u32, h: u32) -> Vec<Vec<u8>> {
+    f.frames
+        .iter()
+        .map(|px| {
+            let mut pre = px.clone();
+            for p in pre.chunks_exact_mut(4) {
+                let a = p[3] as u32;
+                for c in &mut p[..3] {
+                    *c = ((*c as u32 * a + 127) / 255) as u8;
+                }
+            }
+            let Some(img) = image::RgbaImage::from_raw(f.width, f.height, pre) else {
+                return vec![0; (w * h * 4) as usize];
+            };
+            let out = image::imageops::resize(&img, w.max(1), h.max(1), image::imageops::FilterType::CatmullRom);
+            let mut raw = out.into_raw();
+            // filter overshoot can leave a colour brighter than its alpha allows; keep it valid
+            for p in raw.chunks_exact_mut(4) {
+                let a = p[3];
+                for c in &mut p[..3] {
+                    *c = (*c).min(a);
+                }
+            }
+            raw
+        })
+        .collect()
+}
+
 /// Decodes a PNG or an animated PNG (APNG); anything else the image library reads works as a still.
 pub fn decode_media(bytes: &[u8]) -> Result<Frames, String> {
     use image::AnimationDecoder;
@@ -511,6 +542,25 @@ pub fn decode_media(bytes: &[u8]) -> Result<Frames, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resample_averages_and_premultiplies() {
+        // 8×2: four white columns then four black, then the same with see-through white
+        let w = [255, 255, 255, 255];
+        let b = [0, 0, 0, 255];
+        let clear = [255, 255, 255, 0];
+        let row = |a: [u8; 4], c: [u8; 4]| [a, a, a, a, c, c, c, c].concat();
+        let f = Frames { width: 8, height: 2, frame_ms: 0, frames: vec![[row(w, b), row(w, b)].concat(), [row(w, clear), row(w, clear)].concat()], order: vec![0, 1] };
+        let out = resample(&f, 4, 1);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].len(), 4 * 4);
+        // halving keeps the outer columns pure: white on the left, black on the right
+        assert_eq!(&out[0][..4], &[255, 255, 255, 255]);
+        assert_eq!(&out[0][12..], &[0, 0, 0, 255]);
+        // premultiplied: the see-through side has no colour, and nothing outshines its alpha
+        assert_eq!(&out[1][12..], &[0, 0, 0, 0]);
+        assert!(out.iter().flat_map(|f| f.chunks(4)).all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]));
+    }
 
     #[test]
     fn versions() {

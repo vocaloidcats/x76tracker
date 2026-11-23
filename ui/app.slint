@@ -93,7 +93,8 @@ export struct ShareGame { label: string, tier: string, tier-key: int, rank: stri
 export struct ShareCard { ok: bool, name: string, handle: string, initial: string, supporter: bool, has-avatar: bool, has-banner: bool, date: string, games: [ShareGame] }
 // What's new. A picture is still (one frame) or animated; aspect = height / width.
 // natural = width in points (pixels / density), so a picture is never stretched past its own size
-export struct ChangeMedia { has: bool, ready: bool, failed: bool, alt: string, frames: [image], frame-ms: int, aspect: float, natural: float }
+// made-for: the on-screen width (physical pixels) the frames were resampled for, 0 for the picture as it is
+export struct ChangeMedia { has: bool, ready: bool, failed: bool, alt: string, src: string, frames: [image], frame-ms: int, aspect: float, natural: float, made-for: int }
 export struct ChangeItem { title: string, text: string, media: ChangeMedia }
 // kind: 0 new (green), 1 improved (blue), 2 fixed (red), 3 other
 export struct ChangeSection { title: string, kind: int, items: [ChangeItem] }
@@ -105,6 +106,8 @@ export struct UpdatesPage {
 
 // ---------------------------------------------------------------- actions (handled in Rust)
 export global Actions {
+    // a What's new picture is drawn this many physical pixels wide and high: resample it to that
+    callback media-size(src: string, width: int, height: int);
     callback period(index: int);
     callback interval(index: int);
     callback refresh();
@@ -2481,6 +2484,17 @@ component MediaView inherits Rectangle {
     in property <ChangeMedia> m;
     property <length> w: root.m.ready && root.m.natural > 0 ? min(root.width, root.m.natural * 1px + 2px) : root.width;
     height: root.m.ready ? (root.w - 2px) * root.m.aspect + 2px : 96px;
+    // The software renderer scales an image by taking the nearest pixel, so a 2x picture shown at
+    // half size would keep one pixel in four and its text would look jagged. Instead x76tracker
+    // resamples each picture (properly filtered) to the exact physical size it's drawn at; until
+    // that's ready, and while the window is being resized, the picture as it is stands in.
+    property <int> want-w: root.m.ready ? round((root.w - 2px) / 1phx) : 0;
+    property <int> want-h: root.m.ready ? round((root.height - 2px) / 1phx) : 0;
+    Timer {
+        interval: 250ms;
+        running: root.want-w > 0 && root.want-w != root.m.made-for;
+        triggered => { Actions.media-size(root.m.src, root.want-w, root.want-h); }
+    }
     Rectangle {
         x: 0;
         width: root.w;
@@ -2493,7 +2507,8 @@ component MediaView inherits Rectangle {
             y: 1px;
             width: parent.width - 2px;
             height: parent.height - 2px;
-            image-fit: contain;
+            // fill: a resampled picture is exactly this size (contain could shrink it by a pixel)
+            image-fit: fill;
             source: root.m.frames.length > 1
                 ? root.m.frames[Math.mod(Math.floor(animation-tick() / 1ms / max(10, root.m.frame-ms)), root.m.frames.length)]
                 : root.m.frames[0];
