@@ -514,13 +514,14 @@ fn set_discord_page(app: &AppWindow, core: &tracker::Core, force: bool) {
     let favs: Vec<(&str, &str, &str)> = core.state.favorites.iter().map(|f| (f.game.as_str(), f.id.as_str(), f.name.as_str())).collect();
     // everything the page shows from elsewhere too: the game-log switches, recap and notifications
     let sig = format!(
-        "{}|{}|{favs:?}|{:?}|{:?}|{:?}|{}",
+        "{}|{}|{favs:?}|{:?}|{:?}|{:?}|{}|{:?}",
         serde_json::to_string(&cfg).unwrap_or_default(),
         core.discord.token.is_some(),
         core.r5patch,
         core.qllog,
         core.state.settings.get("recapAuto"),
-        core.notify_on()
+        core.notify_on(),
+        (core.shown(Game::Ql), core.shown(Game::R5))
     );
     let changed = DISCORD_SIG.with(|s| {
         let mut s = s.borrow_mut();
@@ -1104,6 +1105,23 @@ fn wire(app: &AppWindow, shared: &Arc<Shared>) {
             });
             if let Some(app) = w.upgrade() {
                 deliver_notes(&app, &s);
+            }
+        }
+    });
+    actions.on_show_game({
+        let (w, s) = ctx!();
+        move |game, on| {
+            {
+                let mut core = s.lock();
+                let (this, other) = if game.as_str() == "ql" { ("showQl", "showR5") } else { ("showR5", "showQl") };
+                core.set_setting(this, on.into());
+                // one board always stays: hiding the last one shows the other
+                if !on {
+                    core.set_setting(other, true.into());
+                }
+            }
+            if let Some(app) = w.upgrade() {
+                refresh(&app, &s);
             }
         }
     });

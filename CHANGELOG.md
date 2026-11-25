@@ -2,6 +2,14 @@
 
 Each version's section is shown in the app (What's new) and used as its GitHub release notes. Pictures are paths in this repository; the moving ones are animated PNGs.
 
+## 2.3.2
+
+![Settings → General → Games: Quake Live on, R5Reloaded off](docs/changelog/2.3.2-hide-game@2x.png)
+
+### New
+
+- **Hide a game:** Settings → General → Games has a switch for Quake Live and one for R5Reloaded. Turn one off and its board, its servers and its compact-mode row go away, and the other game takes the full width. x76tracker keeps checking a hidden game, so turning it back on shows its full history. One game always stays on. Thanks to xvv for asking for this!
+
 ## 2.3.1
 
 ![Quake Live results: five casual wins, each with a blue casual bubble and the Elo it would have been worth on ranked](docs/changelog/2.3.1-ql-casual@2x.png)

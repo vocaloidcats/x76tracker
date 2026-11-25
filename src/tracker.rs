@@ -863,6 +863,12 @@ impl Core {
         true
     }
 
+    /// Whether a game's board is shown (Settings → Games). Hidden games are still checked, so
+    /// showing one again has no gap in its history.
+    pub fn shown(&self, game: Game) -> bool {
+        self.state.settings.get(if game == Game::Ql { "showQl" } else { "showR5" }).and_then(Value::as_bool).unwrap_or(true)
+    }
+
     pub fn notify_on(&self) -> bool {
         self.state.settings.get("notify").and_then(Value::as_bool).unwrap_or(false)
     }

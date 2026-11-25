@@ -81,7 +81,7 @@ export struct ProfileCard {
 export struct WidgetSlot { key: string, kind: int, surface: string, name: string, source: int, custom: string, is-custom: bool }
 export struct StaticText { surface: string, name: string, text: string }
 export struct DiscordPage {
-    rpc: bool, rpc-app: string, r5-patch: bool, r5-found: bool, ql-log: bool, recap-auto: bool, notify: bool,
+    rpc: bool, rpc-app: string, r5-patch: bool, r5-found: bool, ql-log: bool, recap-auto: bool, notify: bool, show-ql: bool, show-r5: bool,
     players-r5: [string], player-r5: int, players-ql: [string], player-ql: int,
     widget: bool, app-id: string, user-id: string, has-token: bool, widget-rpc: bool,
     slots: [WidgetSlot], statics: [StaticText],
@@ -130,6 +130,7 @@ export global Actions {
     callback close-recap();
     callback recap-step(dir: int);
     callback recap-auto(on: bool);
+    callback show-game(game: string, on: bool);
     callback notify(on: bool);
     callback notify-test();
     callback mini(on: bool);
@@ -2890,6 +2891,16 @@ component SettingsPanel inherits Rectangle {
                     tabbody1 := VerticalLayout {
                         y: (1 - parent.ek) * 8px;
                     spacing: 16px;
+                    SectionTitle { text: "Games"; }
+                    Text {
+                        text: "Hide a game you don't play. Its board, servers and compact-mode row go away; x76tracker keeps checking it, so turning it back on shows its full history.";
+                        font-size: 13px;
+                        color: Theme.fg-muted;
+                        wrap: word-wrap;
+                    }
+                    SettingRow { on: root.d.show-ql; title: "Quake Live"; body: ""; toggled(v) => { Actions.show-game("ql", v); } }
+                    SettingRow { on: root.d.show-r5; title: "R5Reloaded"; body: ""; toggled(v) => { Actions.show-game("r5", v); } }
+                    Rectangle { height: 1px; background: Theme.line-1; }
                     SectionTitle { text: "Your players"; }
                     Text {
                         text: "The share card shows these players' numbers (and Discord does, if you turn it on under Experimental). Track yourself on the Ladders tab, then pick yourself here.";
@@ -3777,8 +3788,8 @@ export component AppWindow inherits Window {
                         Rectangle { height: 1px; background: Theme.line-1; }
                         Rectangle { height: 36px; }
 
-                        // games: side by side when wide, stacked when narrow
-                        if root.wide: HorizontalLayout {
+                        // games: side by side when wide, stacked when narrow; one game alone takes the full width
+                        if root.wide && root.discord.show-ql && root.discord.show-r5: HorizontalLayout {
                             spacing: 36px;
                             // fixed equal halves, whatever each column contains
                             VerticalLayout {
@@ -3792,10 +3803,10 @@ export component AppWindow inherits Window {
                                 GameColumn { g: root.r5; status: root.r5-status; status-error: root.r5-status-error; results: root.r5-results; search-msg: root.r5-search-msg; period-word: root.period-word; }
                             }
                         }
-                        if !root.wide: VerticalLayout {
+                        if !root.wide || !root.discord.show-ql || !root.discord.show-r5: VerticalLayout {
                             spacing: 48px;
-                            GameColumn { g: root.ql; status: root.ql-status; status-error: root.ql-status-error; results: root.ql-results; search-msg: root.ql-search-msg; period-word: root.period-word; }
-                            GameColumn { g: root.r5; status: root.r5-status; status-error: root.r5-status-error; results: root.r5-results; search-msg: root.r5-search-msg; period-word: root.period-word; }
+                            if root.discord.show-ql: GameColumn { g: root.ql; status: root.ql-status; status-error: root.ql-status-error; results: root.ql-results; search-msg: root.ql-search-msg; period-word: root.period-word; }
+                            if root.discord.show-r5: GameColumn { g: root.r5; status: root.r5-status; status-error: root.r5-status-error; results: root.r5-results; search-msg: root.r5-search-msg; period-word: root.period-word; }
                         }
 
                         }
@@ -3847,15 +3858,15 @@ export component AppWindow inherits Window {
                             Rectangle { height: 36px; }
                             Rectangle { height: 1px; background: Theme.line-1; }
                             Rectangle { height: 36px; }
-                            if root.wide: HorizontalLayout {
+                            if root.wide && root.discord.show-ql && root.discord.show-r5: HorizontalLayout {
                                 spacing: 36px;
                                 VerticalLayout { alignment: start; width: root.col-w; ServerColumn { g: root.servers.ql; } }
                                 VerticalLayout { alignment: start; width: root.col-w; ServerColumn { g: root.servers.r5; } }
                             }
-                            if !root.wide: VerticalLayout {
+                            if !root.wide || !root.discord.show-ql || !root.discord.show-r5: VerticalLayout {
                                 spacing: 48px;
-                                ServerColumn { g: root.servers.ql; }
-                                ServerColumn { g: root.servers.r5; }
+                                if root.discord.show-ql: ServerColumn { g: root.servers.ql; }
+                                if root.discord.show-r5: ServerColumn { g: root.servers.r5; }
                             }
                         }
                         }

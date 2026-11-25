@@ -788,7 +788,7 @@ pub fn mini_rows(core: &Core) -> Vec<MiniRow> {
         games.sort_by_key(|x| *x != g);
     }
     let mut out = Vec::new();
-    for game in games {
+    for game in games.into_iter().filter(|g| core.shown(*g)) {
         let Some(id) = cfg.player(core, game) else { continue };
         let key = key_of(game.id(), &id);
         let Some(fav) = core.state.favorites.iter().find(|f| f.game == game.id() && f.id == id) else { continue };
@@ -1710,6 +1710,8 @@ pub fn discord_page(core: &Core) -> DiscordPage {
         ql_log: core.qllog == Some(true),
         recap_auto: core.state.settings.get("recapAuto").and_then(serde_json::Value::as_bool).unwrap_or(true),
         notify: core.notify_on(),
+        show_ql: core.shown(Game::Ql),
+        show_r5: core.shown(Game::R5),
         players_r5: model(r5_names.into_iter().map(s).collect()),
         player_r5: r5_i,
         players_ql: model(ql_names.into_iter().map(s).collect()),
